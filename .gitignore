@@ -13,8 +13,13 @@ __pycache__/
 /maps/*.skate
 !/maps/format-demo.skate
 
+# Local investigation notes (icons kept for release packaging).
+/docs/*.md
+
 # Local extraction, animation authoring, archives and credentials.
 *.zip
+!/mods/native-trainer.zip
+!/mods/mario-kart.zip
 *.7z
 *.rar
 *.xex
@@ -22,6 +27,9 @@ __pycache__/
 *.i64
 *.idb
 *.glb
+!/mods/Skyline_Drive_Mod/skyline.glb
+!/mods/Skyline_Drive_Mod/fallback_car.glb
+!/sdk/examples/mario-kart/kart.glb
 *.gltf
 *.fbx
 *.blend
@@ -36,6 +44,7 @@ __pycache__/
 *.key
 
 # Personal feature-test launchers and historical setup reports.
+/BUILD-RELEASE.bat
 /BUILD-MULTIPLAYER-TEST.bat
 /PLAY-MULTIPLAYER-10-INSTANCES.bat
 /PLAY-MULTIPLAYER-2-INSTANCES.bat
@@ -50,10 +59,7 @@ __pycache__/
 
 /mods/.cache/
 
-# Bundled mods requested for source checkout and distribution.
-!/mods/native-trainer.zip
-!/mods/mario-kart.zip
-!/sdk/examples/mario-kart/kart.glb
+# Bundled example assets requested for source checkout and distribution.
 !/sdk/examples/mario-kart/rider.json
 
 /BUILD-MULTIPLAYER-TEST.bat
