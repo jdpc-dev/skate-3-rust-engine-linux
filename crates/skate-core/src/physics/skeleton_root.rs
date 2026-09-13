@@ -123,8 +123,16 @@ pub(crate) fn orthonormalize(source: AnimationPartTransform) -> AnimationPartTra
                 *value -= result[prior][lane] * projection;
             }
         }
-        let reciprocal = inverse_length_squared(dot3(vector, vector), 2);
-        result[axis] = vector.map(|v| v * reciprocal);
+        let squared = dot3(vector, vector);
+        if squared <= f32::from_bits(0x3586_37bd) {
+            // Degenerate axes appear after wipeout bail teleports when heading
+            // initialization and ragdoll frames disagree. NaN here poisons COM
+            // frames and deck torque before the shared solve.
+            result[axis] = IDENTITY[axis];
+        } else {
+            let reciprocal = inverse_length_squared(squared, 2);
+            result[axis] = vector.map(|v| v * reciprocal);
+        }
     }
     result
 }
@@ -169,6 +177,18 @@ mod tests {
             for lane in 0..4 {
                 assert!((product[axis][lane] - IDENTITY[axis][lane]).abs() < 1e-5);
             }
+        }
+    }
+
+    #[test]
+    fn degenerate_axis_falls_back_to_identity() {
+        let mut source = IDENTITY;
+        source[0] = [0.; 4];
+        source[1] = [0.; 4];
+        source[2] = [0.; 4];
+        let result = orthonormalize(source);
+        for axis in 0..3 {
+            assert_eq!(result[axis], IDENTITY[axis]);
         }
     }
 }
