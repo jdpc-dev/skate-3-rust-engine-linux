@@ -91,6 +91,9 @@ pub(super) fn advance(
         super::offboard_root_trace::trace(tick, "teleport", skater);
         //82DB93B0..CC: complete pending queries and clear contact history.
         skater.offboard_contact.reset_history();
+        // Biped cadence survives ordinary Ground reset, but a checkpoint teleport
+        // must not retain an off-board placement from a prior wipeout recovery.
+        skater.biped_ground.controller.reset();
         skater.player_state.reset_for_teleport();
         skater.centre_of_mass_filter.reset();
         skater.animation_feedback.reset();
