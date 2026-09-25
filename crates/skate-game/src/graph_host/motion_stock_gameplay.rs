@@ -4,6 +4,9 @@
 //! not compatibility no-ops. Their producers are completed incrementally and
 //! execution fails with the exact authored operation until that producer is
 //! published by the corresponding physics owner.
+//!
+//! Grind attributes, crouch control and fade belong exclusively to
+//! `motion_grind`; this fallback must not claim those authored handlers.
 use skate_data::state_graph::attributes::Attributes;
 use skate_core::animation::output::attributes::AttributeName;
 use skate_core::animation::skeleton_input::name::encode;
