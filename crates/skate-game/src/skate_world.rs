@@ -221,7 +221,9 @@ fn retail_collision_world(
                 local_to_world: RetailAffineTransform::IDENTITY,
                 world_to_local: RetailAffineTransform::IDENTITY,
                 local_bounds: bounds,
-                matching_group: i32::from(group),
+                // Native static registration uses matchingID -1; the unit group
+                // only splits clusters and must not filter actor queries.
+                matching_group: -1,
                 pool: QueryPool::Ground,
             });
         }
