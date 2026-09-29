@@ -37,6 +37,11 @@ skate-net = { path = "../skate-net" }
 blake3 = "=1.8.7"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 
+# Windows reads the pad through Xinput in platform.rs, so gilrs is only needed
+# to reach the same raw state on other hosts.
+[target.'cfg(not(windows))'.dependencies]
+gilrs = { version = "=0.11.2", default-features = false }
+
 [dev-dependencies]
 naga = { version = "=27.0.3", features = ["wgsl-in"] }
 naga_oil = { version = "=0.20.0", default-features = false }

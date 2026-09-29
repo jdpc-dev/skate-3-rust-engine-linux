@@ -1,9 +1,11 @@
 /target/
 /bin/
+/run/
 /logs/
 /.local/
 /settings/
 /data/
+/sk3/
 __pycache__/
 *.pyc
 /assets/private/
