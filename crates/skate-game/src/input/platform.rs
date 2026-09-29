@@ -1,57 +1,11 @@
-//! Device transport. SDL3 gamepads are the default on every platform; each
-//! state is re-expressed as the XInput-shaped `XboxState`, so raw signed
-//! axes/trigger bytes reach the TU3 converter without Bevy/gilrs deadzones or
-//! normalized-axis reconstruction. `SKATE3_INPUT=xinput` selects the original
-//! Windows XInput transport, which is also the fallback if SDL cannot start.
-use super::controller_kind::{ControllerKind, XinputCaps};
+//! Windows device transport. Raw signed axes/trigger bytes reach the TU3
+//! converter without Bevy/gilrs deadzones or normalized-axis reconstruction.
 use skate_core::input::xbox::XboxState;
-use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// XInput `wButtons` bits, the layout `xbox::convert` consumes.
-pub(crate) const BUTTON_NAMES: [(&str, u16); 14] = [
-    ("dpad_up", 0x0001), ("dpad_down", 0x0002), ("dpad_left", 0x0004), ("dpad_right", 0x0008),
-    ("start", 0x0010), ("back", 0x0020), ("left_stick", 0x0040), ("right_stick", 0x0080),
-    ("left_shoulder", 0x0100), ("right_shoulder", 0x0200),
-    ("a", 0x1000), ("b", 0x2000), ("x", 0x4000), ("y", 0x8000),
-];
-
-pub(crate) fn button_mask(name: &str) -> Option<u16> {
-    BUTTON_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|&(_, bit)| bit)
-}
-
-/// XInput has no paddle inputs, so each paddle (right1, left1, right2, left2)
-/// is folded into the XInput button mask chosen in settings/controller.json.
-static PADDLES: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn set_paddles(masks: [u16; 4]) {
-    let packed = masks.iter().enumerate().fold(0u64, |acc, (i, &m)| acc | u64::from(m) << (16 * i));
-    PADDLES.store(packed, Ordering::Relaxed);
-}
-
-fn paddles() -> [u16; 4] {
-    let packed = PADDLES.load(Ordering::Relaxed);
-    std::array::from_fn(|i| (packed >> (16 * i)) as u16)
-}
-
-/// SDL trigger range 0..=32767 back to the XInput byte. SDL expands XInput's
-/// byte as b*257 over the full axis, then rescales to 0..=32767, so rounding to
-/// nearest returns the original byte exactly.
-pub(crate) fn xinput_trigger(value: i16) -> u8 {
-    ((u32::from(value.max(0) as u16) * 255 + 16383) / 32767) as u8
-}
-
-/// SDL reports stick Y as positive-down by storing `~y`; invert it the same way.
-pub(crate) fn xinput_y(value: i16) -> i16 {
-    !value
-}
 
 pub(crate) struct DevicePacket {
     pub number: u32,
     pub state: XboxState,
     pub subtype: u8,
-    /// Who is in the slot. Metadata only: gameplay reads `state`/`subtype`.
-    pub kind: Option<Arc<ControllerKind>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,48 +13,34 @@ pub(crate) enum DeviceError {
     Disconnected,
     State(u32),
     Capabilities(u32),
-    /// No device backend could be started.
     #[cfg(not(windows))]
-    Unavailable,
-}
-
-/// XInput capability identity of one slot: the subtype `xbox::convert` needs
-/// and the controller kind built from the same capability read.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct XinputIdentity {
-    pub subtype: u8,
-    pub kind: Arc<ControllerKind>,
+    UnsupportedPlatform,
 }
 
 /// Device identity is metadata; raw input is still sampled every host frame.
 /// Refresh periodically as well as after errors, so hot swaps cannot leave a
 /// subtype cached indefinitely even if Windows never exposes a disconnect.
-pub(crate) struct CapabilityCache<T = XinputIdentity> {
-    value: Option<(T, std::time::Instant)>,
+#[derive(Default)]
+pub(crate) struct CapabilityCache {
+    value: Option<(u8, std::time::Instant)>,
 }
-impl<T> Default for CapabilityCache<T> {
-    fn default() -> Self {
-        Self { value: None }
-    }
-}
-impl<T: Clone> CapabilityCache<T> {
+impl CapabilityCache {
     pub(crate) fn invalidate(&mut self) {
         self.value = None;
     }
-    #[cfg_attr(not(windows), allow(dead_code))]
     fn get(
         &mut self,
         now: std::time::Instant,
-        read: impl FnOnce() -> Result<T, DeviceError>,
-    ) -> Result<T, DeviceError> {
-        if let Some((subtype, expires)) = &self.value {
-            if now < *expires {
-                return Ok(subtype.clone());
+        read: impl FnOnce() -> Result<u8, DeviceError>,
+    ) -> Result<u8, DeviceError> {
+        if let Some((subtype, expires)) = self.value {
+            if now < expires {
+                return Ok(subtype);
             }
         }
         self.value = None;
         let subtype = read()?;
-        self.value = Some((subtype.clone(), now + std::time::Duration::from_secs(1)));
+        self.value = Some((subtype, now + std::time::Duration::from_secs(1)));
         Ok(subtype)
     }
 }
@@ -108,7 +48,6 @@ impl<T: Clone> CapabilityCache<T> {
 #[cfg(windows)]
 mod windows {
     use super::*;
-    use crate::input::controller_kind;
     use std::mem::MaybeUninit;
 
     // ABI from the installed Windows SDK Xinput.h. No OS-owned pointers are
@@ -144,72 +83,11 @@ mod windows {
     const _: () = assert!(size_of::<Gamepad>() == 12);
     const _: () = assert!(size_of::<State>() == 16);
     const _: () = assert!(size_of::<Capabilities>() == 20);
-    /// XINPUT_CAPABILITIES_EX as SDL declares it (xinput1_4 ordinal 108).
-    #[repr(C)]
-    struct CapabilitiesEx {
-        capabilities: Capabilities,
-        vendor_id: u16,
-        product_id: u16,
-        product_version: u16,
-        unknown1: u16,
-        unknown2: u32,
-    }
-    const _: () = assert!(size_of::<CapabilitiesEx>() == 32);
-    type GetCapabilitiesEx = unsafe extern "system" fn(u32, u32, u32, *mut CapabilitiesEx) -> u32;
 
     #[link(name = "xinput")]
     unsafe extern "system" {
         fn XInputGetState(index: u32, state: *mut State) -> u32;
         fn XInputGetCapabilities(index: u32, flags: u32, capabilities: *mut Capabilities) -> u32;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
-        fn GetProcAddress(module: *mut std::ffi::c_void, name: *const u8) -> *mut std::ffi::c_void;
-    }
-
-    /// Undocumented XInputGetCapabilitiesEx (Windows 8+ xinput1_4, ordinal
-    /// 108), which SDL also uses for vendor/product. None when absent.
-    fn capabilities_ex() -> Option<GetCapabilitiesEx> {
-        static FUNCTION: OnceLock<Option<GetCapabilitiesEx>> = OnceLock::new();
-        *FUNCTION.get_or_init(|| {
-            let name: Vec<u16> = "xinput1_4.dll\0".encode_utf16().collect();
-            // SAFETY: NUL-terminated wide string; the module is never freed.
-            let module = unsafe { LoadLibraryW(name.as_ptr()) };
-            if module.is_null() {
-                return None;
-            }
-            // SAFETY: ordinal lookup (MAKEINTRESOURCE(108)) in a loaded module.
-            let function = unsafe { GetProcAddress(module, 108usize as *const u8) };
-            // SAFETY: the export at ordinal 108 has SDL's declared signature.
-            (!function.is_null()).then(|| unsafe {
-                std::mem::transmute::<*mut std::ffi::c_void, GetCapabilitiesEx>(function)
-            })
-        })
-    }
-
-    /// Vendor/product of slot `index`, if XInputGetCapabilitiesEx exists and
-    /// reports one. Never affects the subtype gameplay uses.
-    fn vendor_product(index: u32) -> Option<(u16, u16)> {
-        let function = capabilities_ex()?;
-        let mut capabilities = MaybeUninit::<CapabilitiesEx>::zeroed();
-        // SAFETY: SDL's call shape (1, index, 0, out); read only on success.
-        let result = unsafe { function(1, index, 0, capabilities.as_mut_ptr()) };
-        if result != 0 {
-            return None;
-        }
-        // SAFETY: zero-initialised storage the successful call filled.
-        let capabilities = unsafe { capabilities.assume_init() };
-        (capabilities.vendor_id != 0).then_some((capabilities.vendor_id, capabilities.product_id))
-    }
-
-    fn kind(capabilities: &Capabilities, index: u32, user: &[controller_kind::Model]) -> ControllerKind {
-        let caps = XinputCaps {
-            subtype: capabilities.subtype,
-            flags: capabilities.flags,
-            vendor_product: vendor_product(index),
-        };
-        controller_kind::from_xinput(caps, user)
     }
 
     pub(super) fn poll(
@@ -228,16 +106,14 @@ mod windows {
         if result != 0 {
             return Err(DeviceError::State(result));
         }
-        let identity = cache.get(std::time::Instant::now(), || {
+        let subtype = cache.get(std::time::Instant::now(), || {
             let mut capabilities = MaybeUninit::<Capabilities>::uninit();
             // SAFETY: writable storage with the SDK ABI; read only on success.
             let result = unsafe { XInputGetCapabilities(index, 1, capabilities.as_mut_ptr()) };
             if result != 0 {
                 return Err(DeviceError::Capabilities(result));
             }
-            let capabilities = unsafe { capabilities.assume_init() };
-            let kind = kind(&capabilities, index, controller_kind::user_models());
-            Ok(XinputIdentity { subtype: capabilities.subtype, kind: Arc::new(kind) })
+            Ok(unsafe { capabilities.assume_init() }.subtype)
         })?;
         // SAFETY: successful XInputGetState initialized the complete structure.
         let state = unsafe { state.assume_init() };
@@ -249,260 +125,317 @@ mod windows {
                 left: [state.gamepad.left_x, state.gamepad.left_y],
                 right: [state.gamepad.right_x, state.gamepad.right_y],
             },
-            subtype: identity.subtype,
-            kind: Some(identity.kind),
+            subtype,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+mod linux {
+    use super::*;
+    use gilrs::{Axis, Button, Gamepad, GamepadId, Gilrs, GilrsBuilder};
+    use std::cell::RefCell;
+
+    const MAX_PADS: usize = 4;
+    /// XInput reports a standard pad as subtype 1, which is what makes the TU3
+    /// converter emit a zeroed device byte 13.
+    const STANDARD_GAMEPAD: u8 = 1;
+    /// Axis-only d-pad fallback: without the default filters a pad that reports
+    /// a hat and no d-pad buttons is folded in here instead.
+    const DPAD_THRESHOLD: f32 = 0.5;
+
+    /// The bundled SDL database maps an Xbox pad's `leftshoulder`/`rightshoulder`
+    /// onto these, and its `lefttrigger`/`righttrigger` onto `Axis::LeftZ`/
+    /// `Axis::RightZ`, so the digital and analog halves land in the same two
+    /// XInput fields the Windows path fills from `Gamepad`.
+    const TRACKED_BUTTONS: [Button; 15] = [
+        Button::DPadUp,
+        Button::DPadDown,
+        Button::DPadLeft,
+        Button::DPadRight,
+        Button::Start,
+        Button::Select,
+        Button::LeftThumb,
+        Button::RightThumb,
+        Button::LeftTrigger,
+        Button::RightTrigger,
+        Button::Mode,
+        Button::South,
+        Button::East,
+        Button::West,
+        Button::North,
+    ];
+
+    const fn button_bit(button: Button) -> u16 {
+        match button {
+            Button::DPadUp => 1 << 0,
+            Button::DPadDown => 1 << 1,
+            Button::DPadLeft => 1 << 2,
+            Button::DPadRight => 1 << 3,
+            Button::Start => 1 << 4,
+            Button::Select => 1 << 5,
+            Button::LeftThumb => 1 << 6,
+            Button::RightThumb => 1 << 7,
+            Button::LeftTrigger => 1 << 8,
+            Button::RightTrigger => 1 << 9,
+            // XInput bit 11 is the guide button; the converter drops it, but
+            // callers reading `XboxState::buttons` expect XInput's layout.
+            Button::Mode => 1 << 11,
+            Button::South => 1 << 12,
+            Button::East => 1 << 13,
+            Button::West => 1 << 14,
+            Button::North => 1 << 15,
+            _ => 0,
+        }
+    }
+
+    /// gilrs normalizes every axis onto `-1..=1` and Linux reverses Y so that
+    /// pushing the stick up reads negative. Xinput hands the converter an `i16`
+    /// with up positive, so flip Y and span the full asymmetric range.
+    fn axis_i16(value: f32) -> i16 {
+        let value = value.clamp(-1.0, 1.0);
+        let scaled = if value < 0.0 {
+            value * f32::from(i16::MIN.unsigned_abs())
+        } else {
+            value * f32::from(i16::MAX)
+        };
+        scaled as i16
+    }
+
+    /// A trigger axis arriving from evdev as `0..=1023` is normalized by gilrs
+    /// onto `-1..=1` like any other axis, so re-center before scaling into the
+    /// XInput `0..=255` byte; released must land on 0, not on -1.
+    fn trigger_u8(value: f32) -> u8 {
+        let unit = (value.clamp(-1.0, 1.0) + 1.0) * 0.5;
+        (unit * f32::from(u8::MAX)).round() as u8
+    }
+
+    /// A trigger reported as a button-with-value is not centered, so it is
+    /// scaled directly. Axis form is preferred because it is what the bundled
+    /// database uses for pads that expose a real analog trigger.
+    fn trigger_byte(gamepad: &Gamepad<'_>, axis: Axis, button: Button) -> u8 {
+        match gamepad.axis_data(axis) {
+            Some(data) => trigger_u8(data.value()),
+            None => match gamepad.button_data(button) {
+                Some(data) => (data.value().clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8,
+                None => 0,
+            },
+        }
+    }
+
+    /// Missing elements read as rest rather than panicking, so an unmapped
+    /// stick is neutral instead of a hard failure.
+    fn axis_value(gamepad: &Gamepad<'_>, axis: Axis) -> f32 {
+        gamepad.axis_data(axis).map_or(0.0, |data| data.value())
+    }
+
+    struct Pads {
+        gilrs: Gilrs,
+        /// gilrs keeps a pad's id stable for the life of the context, so pairing
+        /// ids with slots here keeps a pad on one controller slot and leaves
+        /// the native slot history coherent across frames and hot-plugs.
+        slots: Vec<(GamepadId, usize)>,
+        packets: [u32; MAX_PADS],
+    }
+
+    impl Pads {
+        fn refresh_slots(&mut self) {
+            let connected: Vec<GamepadId> = self.gilrs.gamepads().map(|(id, _)| id).collect();
+            // Free the slots of pads that went away before handing out new ones.
+            self.slots.retain(|(id, _)| connected.contains(id));
+            for id in connected {
+                if self.slots.iter().any(|(known, _)| *known == id) {
+                    continue;
+                }
+                if let Some(free) =
+                    (0..MAX_PADS).find(|slot| !self.slots.iter().any(|(_, taken)| taken == slot))
+                {
+                    self.slots.push((id, free));
+                }
+            }
+        }
+
+        fn poll(&mut self, index: usize) -> Result<DevicePacket, DeviceError> {
+            // gilrs only refreshes cached gamepad state while events are drained.
+            while self.gilrs.next_event().is_some() {}
+            self.refresh_slots();
+            let Some((id, _)) = self.slots.iter().find(|(_, slot)| *slot == index).copied() else {
+                return Err(DeviceError::Disconnected);
+            };
+            let gamepad = self.gilrs.gamepad(id);
+
+            let mut buttons = TRACKED_BUTTONS
+                .iter()
+                .filter(|button| gamepad.is_pressed(**button))
+                .fold(0u16, |bits, button| bits | button_bit(*button));
+            // A hat that the mapping turned into axes is all a pad without d-pad
+            // buttons reports; these are the same bits, so folding them in is
+            // idempotent.
+            let horizontal = axis_value(&gamepad, Axis::DPadX);
+            if horizontal <= -DPAD_THRESHOLD {
+                buttons |= 1 << 2;
+            } else if horizontal >= DPAD_THRESHOLD {
+                buttons |= 1 << 3;
+            }
+            let vertical = axis_value(&gamepad, Axis::DPadY);
+            if vertical <= -DPAD_THRESHOLD {
+                buttons |= 1 << 0;
+            } else if vertical >= DPAD_THRESHOLD {
+                buttons |= 1 << 1;
+            }
+
+            self.packets[index] = self.packets[index].wrapping_add(1);
+            Ok(DevicePacket {
+                number: self.packets[index],
+                state: XboxState {
+                    buttons,
+                    triggers: [
+                        trigger_byte(&gamepad, Axis::LeftZ, Button::LeftTrigger2),
+                        trigger_byte(&gamepad, Axis::RightZ, Button::RightTrigger2),
+                    ],
+                    left: [
+                        axis_i16(axis_value(&gamepad, Axis::LeftStickX)),
+                        axis_i16(-axis_value(&gamepad, Axis::LeftStickY)),
+                    ],
+                    right: [
+                        axis_i16(axis_value(&gamepad, Axis::RightStickX)),
+                        axis_i16(-axis_value(&gamepad, Axis::RightStickY)),
+                    ],
+                },
+                subtype: STANDARD_GAMEPAD,
+            })
+        }
+    }
+
+    thread_local! {
+        /// One context per thread, built on first poll. A build failure is
+        /// remembered so a host without usable input does not pay for a retry
+        /// every frame.
+        static PADS: RefCell<Option<Result<Pads, ()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn poll(
+        index: usize,
+        cache: &mut CapabilityCache,
+    ) -> Result<DevicePacket, DeviceError> {
+        PADS.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell.is_none() {
+                *cell = Some(build());
+            }
+            match cell.as_mut().expect("just initialized") {
+                Ok(pads) => {
+                    let result = pads.poll(index);
+                    if result.is_err() {
+                        cache.invalidate();
+                    }
+                    result
+                }
+                // gilrs could not reach a usable input source on this host, so
+                // there is no pad to report.
+                Err(()) => Err(DeviceError::UnsupportedPlatform),
+            }
         })
     }
 
-    /// Identity of a slot without touching gameplay state (hardware test).
-    #[cfg(test)]
-    pub(crate) fn identity(index: u32) -> Option<ControllerKind> {
-        let mut capabilities = MaybeUninit::<Capabilities>::uninit();
-        // SAFETY: as in `poll`.
-        if unsafe { XInputGetCapabilities(index, 1, capabilities.as_mut_ptr()) } != 0 {
-            return None;
-        }
-        let capabilities = unsafe { capabilities.assume_init() };
-        Some(kind(&capabilities, index, &[]))
-    }
-
-    /// The undocumented export exists on this Windows and agrees with the
-    /// documented call about which slots hold a device.
-    #[test]
-    fn capabilities_ex_resolves_and_agrees_with_documented_call() {
-        let function = capabilities_ex().expect("xinput1_4 ordinal 108");
-        for index in 0..4 {
-            let mut ex = MaybeUninit::<CapabilitiesEx>::zeroed();
-            let mut plain = MaybeUninit::<Capabilities>::zeroed();
-            // SAFETY: as in `vendor_product` / `poll`.
-            let ex_result = unsafe { function(1, index, 0, ex.as_mut_ptr()) };
-            let plain_result = unsafe { XInputGetCapabilities(index, 0, plain.as_mut_ptr()) };
-            assert_eq!(ex_result == 0, plain_result == 0, "slot {index}: {ex_result} vs {plain_result}");
-            if ex_result == 0 {
-                let (ex, plain) = unsafe { (ex.assume_init(), plain.assume_init()) };
-                assert_eq!((ex.capabilities.device_type, ex.capabilities.subtype), (plain.device_type, plain.subtype));
-            }
-        }
-    }
-}
-
-/// XInput identity of a slot, for the hardware test.
-#[cfg(all(windows, test))]
-pub(crate) fn xinput_identity(index: u32) -> Option<ControllerKind> {
-    windows::identity(index)
-}
-
-mod sdl {
-    use super::*;
-    use crate::input::controller_kind;
-    use bevy::log::{info, warn};
-    use sdl3::event::Event;
-    use sdl3::gamepad::{Axis, Button, Gamepad};
-    use std::sync::{Mutex, mpsc};
-
-    /// Polling faster than any pad reports keeps added latency below 1 ms.
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
-    /// XINPUT_DEVSUBTYPE_GAMEPAD; SDL only opens devices it maps as gamepads.
-    const SUBTYPE_GAMEPAD: u8 = 1;
-    const BUTTONS: [(Button, u16); 14] = [
-        (Button::DPadUp, 0x0001), (Button::DPadDown, 0x0002),
-        (Button::DPadLeft, 0x0004), (Button::DPadRight, 0x0008),
-        (Button::Start, 0x0010), (Button::Back, 0x0020),
-        (Button::LeftStick, 0x0040), (Button::RightStick, 0x0080),
-        (Button::LeftShoulder, 0x0100), (Button::RightShoulder, 0x0200),
-        (Button::South, 0x1000), (Button::East, 0x2000),
-        (Button::West, 0x4000), (Button::North, 0x8000),
-    ];
-    const PADDLE_BUTTONS: [Button; 4] =
-        [Button::RightPaddle1, Button::LeftPaddle1, Button::RightPaddle2, Button::LeftPaddle2];
-
-    type Published = Option<(u32, XboxState, Arc<ControllerKind>)>;
-
-    /// Latest (packet number, state, identity) per slot, like XInputGetState's snapshot.
-    pub(super) struct Shared {
-        slots: Mutex<[Published; 4]>,
-    }
-
-    struct Slot {
-        pad: Gamepad,
-        id: u32,
-        number: u32,
-        state: XboxState,
-        kind: Arc<ControllerKind>,
-    }
-
-    /// SDL must be pumped on the thread that initialised it, while Bevy runs
-    /// systems on a pool; a dedicated thread owns SDL and publishes snapshots.
-    pub(super) fn start() -> Result<&'static Shared, String> {
-        let shared: &'static Shared = Box::leak(Box::new(Shared { slots: Mutex::new(Default::default()) }));
-        let (ready, started) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("sdl-gamepad".into())
-            .spawn(move || run(shared, ready))
-            .map_err(|e| e.to_string())?;
-        started.recv().map_err(|_| "SDL gamepad thread exited".to_string())??;
-        Ok(shared)
-    }
-
-    pub(super) fn poll(shared: &Shared, index: usize) -> Result<DevicePacket, DeviceError> {
-        let slots = shared.slots.lock().unwrap_or_else(|e| e.into_inner());
-        slots[index]
-            .as_ref()
-            .map(|(number, state, kind)| DevicePacket {
-                number: *number,
-                state: *state,
-                subtype: SUBTYPE_GAMEPAD,
-                kind: Some(kind.clone()),
+    fn build() -> Result<Pads, ()> {
+        GilrsBuilder::new()
+            .with_default_filters(false)
+            .with_force_feedback(false)
+            .build()
+            .map(|gilrs| Pads {
+                gilrs,
+                slots: Vec::new(),
+                packets: [0; MAX_PADS],
             })
-            .ok_or(DeviceError::Disconnected)
+            .map_err(|_| ())
     }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-    fn run(shared: &'static Shared, ready: mpsc::Sender<Result<(), String>>) {
-        // The window belongs to winit, so SDL never sees focus; the game
-        // decides itself when unfocused input is ignored (multiplayer).
-        sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
-        let init = (|| {
-            let context = sdl3::init()?;
-            let gamepads = context.gamepad()?;
-            let events = context.event_pump()?;
-            Ok::<_, sdl3::Error>((context, gamepads, events))
-        })();
-        let (_context, gamepads, mut events) = match init {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = ready.send(Err(error.to_string()));
-                return;
-            }
-        };
-        let _ = ready.send(Ok(()));
-        info!("Controller input: SDL {}", sdl3::version::version());
-        let mut slots: [Option<Slot>; 4] = Default::default();
-        // Devices present at startup are also announced as GamepadAdded.
-        for id in gamepads.gamepads().unwrap_or_default() {
-            open(&gamepads, &mut slots, id);
+        /// gilrs normalizes onto `-1..=1`, so the endpoints have to survive the trip
+        /// into Xinput's asymmetric `i16` without saturating or wrapping.
+        #[test]
+        fn axis_i16_spans_the_xinput_range() {
+            assert_eq!(axis_i16(0.0), 0);
+            assert_eq!(axis_i16(-1.0), i16::MIN);
+            assert_eq!(axis_i16(1.0), i16::MAX);
+            assert_eq!(axis_i16(f32::INFINITY), i16::MAX);
+            assert_eq!(axis_i16(f32::NEG_INFINITY), i16::MIN);
+            assert_eq!(axis_i16(f32::NAN), 0);
+            assert_eq!(axis_i16(0.5), 16383);
         }
-        loop {
-            for event in events.poll_iter() {
-                match event {
-                    Event::GamepadAdded { which, .. } => open(&gamepads, &mut slots, which),
-                    Event::GamepadRemoved { which, .. } => {
-                        for (index, slot) in slots.iter_mut().enumerate() {
-                            if slot.as_ref().is_some_and(|s| s.id == which.raw()) {
-                                *slot = None;
-                                info!("Controller {index}: SDL gamepad removed");
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let paddles = paddles();
-            let mut published: [Published; 4] = Default::default();
-            for (slot, output) in slots.iter_mut().zip(&mut published) {
-                let Some(slot) = slot else { continue };
-                let state = read(&slot.pad, paddles);
-                // Mirrors XInput dwPacketNumber: advances only when state changes.
-                if state != slot.state {
-                    slot.number = slot.number.wrapping_add(1);
-                    slot.state = state;
-                }
-                *output = Some((slot.number, state, slot.kind.clone()));
-            }
-            *shared.slots.lock().unwrap_or_else(|e| e.into_inner()) = published;
-            std::thread::sleep(POLL_INTERVAL);
-        }
-    }
 
-    fn open(gamepads: &sdl3::GamepadSubsystem, slots: &mut [Option<Slot>; 4], id: sdl3::joystick::JoystickId) {
-        if slots.iter().flatten().any(|s| s.id == id.raw()) {
-            return;
+        /// A released evdev trigger reaches gilrs as -1 and must convert to 0; the
+        /// old bug of scaling the raw axis left triggers near 0 until fully pressed.
+        #[test]
+        fn trigger_u8_recenters_the_normalized_axis() {
+            assert_eq!(trigger_u8(-1.0), 0);
+            assert_eq!(trigger_u8(1.0), 255);
+            assert_eq!(trigger_u8(0.0), 128);
+            assert_eq!(trigger_u8(-1.0001), 0);
+            assert_eq!(trigger_u8(1.0001), 255);
         }
-        let pad = match gamepads.open(id) {
-            Ok(pad) => pad,
-            Err(error) => return warn!("SDL gamepad {}: cannot open: {error}", id.raw()),
-        };
-        // XInput-backed pads report their XInput user index as player index;
-        // keep that slot so the ring light matches, else take the first free one.
-        let preferred = pad.player_index().map(usize::from).filter(|&i| i < 4 && slots[i].is_none());
-        let Some(index) = preferred.or_else(|| slots.iter().position(Option::is_none)) else {
-            return warn!("SDL gamepad {}: all four controller slots are in use", id.raw());
-        };
-        info!(
-            "Controller {index}: SDL gamepad {:?} ({:?}, vendor {:04x} product {:04x}, paddles {}, path {:?})",
-            pad.name().unwrap_or_default(),
-            pad.r#type(),
-            pad.vendor_id().unwrap_or(0),
-            pad.product_id().unwrap_or(0),
-            if pad.has_button(Button::RightPaddle1) { "available" } else { "not reported" },
-            pad.path().unwrap_or_default(),
-        );
-        let kind = Arc::new(controller_kind::from_sdl(
-            controller_kind::SdlReport {
-                name: pad.name().unwrap_or_default(),
-                gamepad_type: pad.r#type(),
-                vendor_id: pad.vendor_id(),
-                product_id: pad.product_id(),
-                path: pad.path().unwrap_or_default(),
-                paddles: PADDLE_BUTTONS.iter().filter(|&&b| pad.has_button(b)).count() as u8,
-                touchpad: pad.touchpads_count() > 0,
-                misc_button: pad.has_button(Button::Misc1),
-            },
-            controller_kind::user_models(),
-        ));
-        slots[index] = Some(Slot { pad, id: id.raw(), number: 0, state: XboxState::default(), kind });
-    }
 
-    fn read(pad: &Gamepad, paddles: [u16; 4]) -> XboxState {
-        let mut buttons = 0;
-        for (button, bit) in BUTTONS {
-            if pad.button(button) {
-                buttons |= bit;
+        /// The bundled database puts the Xbox bumpers on the trigger-named buttons
+        /// and leaves bits 10/11 to the guide button.
+        #[test]
+        fn button_bits_match_the_xinput_layout() {
+            assert_eq!(button_bit(Button::DPadUp), 0x0001);
+            assert_eq!(button_bit(Button::DPadDown), 0x0002);
+            assert_eq!(button_bit(Button::DPadLeft), 0x0004);
+            assert_eq!(button_bit(Button::DPadRight), 0x0008);
+            assert_eq!(button_bit(Button::Start), 0x0010);
+            assert_eq!(button_bit(Button::Select), 0x0020);
+            assert_eq!(button_bit(Button::LeftThumb), 0x0040);
+            assert_eq!(button_bit(Button::RightThumb), 0x0080);
+            assert_eq!(button_bit(Button::LeftTrigger), 0x0100);
+            assert_eq!(button_bit(Button::RightTrigger), 0x0200);
+            assert_eq!(button_bit(Button::Mode), 0x0800);
+            assert_eq!(button_bit(Button::South), 0x1000);
+            assert_eq!(button_bit(Button::East), 0x2000);
+            assert_eq!(button_bit(Button::West), 0x4000);
+            assert_eq!(button_bit(Button::North), 0x8000);
+            // C/Z and the untracked variants must not invent bits.
+            assert_eq!(button_bit(Button::C), 0);
+            assert_eq!(button_bit(Button::Z), 0);
+            assert_eq!(button_bit(Button::LeftTrigger2), 0);
+            assert_eq!(button_bit(Button::RightTrigger2), 0);
+        }
+
+        /// Bumpers are read as buttons while the analog triggers come from the centered
+        /// axes, so a pad that also reports the trigger-named axes must not have them
+        /// folded into the digital bits.
+        #[test]
+        fn tracked_buttons_cover_the_xbox_layout_exactly_once() {
+            let tracked = |button| TRACKED_BUTTONS.contains(&button);
+            assert!(tracked(Button::LeftTrigger) && tracked(Button::RightTrigger));
+            assert!(
+                !tracked(Button::LeftTrigger2) && !tracked(Button::RightTrigger2),
+                "the analog trigger buttons must not set a digital bit"
+            );
+            for button in TRACKED_BUTTONS {
+                let bit = button_bit(button);
+                assert_ne!(bit, 0, "{button:?} is tracked but maps to no bit");
+                assert_eq!(
+                    TRACKED_BUTTONS
+                        .iter()
+                        .filter(|other| button_bit(**other) == bit)
+                        .count(),
+                    1,
+                    "{button:?} collides with another tracked button"
+                );
             }
         }
-        for (button, mask) in PADDLE_BUTTONS.into_iter().zip(paddles) {
-            if mask != 0 && pad.button(button) {
-                buttons |= mask;
-            }
-        }
-        XboxState {
-            buttons,
-            triggers: [xinput_trigger(pad.axis(Axis::TriggerLeft)), xinput_trigger(pad.axis(Axis::TriggerRight))],
-            left: [pad.axis(Axis::LeftX), xinput_y(pad.axis(Axis::LeftY))],
-            right: [pad.axis(Axis::RightX), xinput_y(pad.axis(Axis::RightY))],
+
+        /// The converter drops bits 10 and 11, so a reported subtype must not be 7
+        /// or byte 13 would be set for an ordinary pad.
+        #[test]
+        fn subtype_keeps_device_byte_13_clear() {
+            assert_ne!(STANDARD_GAMEPAD, 7);
         }
     }
-}
-
-enum Backend {
-    Sdl(&'static sdl::Shared),
-    #[cfg(windows)]
-    XInput,
-    #[cfg(not(windows))]
-    Unavailable,
-}
-
-fn backend() -> &'static Backend {
-    static BACKEND: OnceLock<Backend> = OnceLock::new();
-    BACKEND.get_or_init(|| {
-        #[cfg(windows)]
-        if std::env::var("SKATE3_INPUT").is_ok_and(|v| v.eq_ignore_ascii_case("xinput")) {
-            bevy::log::info!("Controller input: XInput (SKATE3_INPUT=xinput)");
-            return Backend::XInput;
-        }
-        match sdl::start() {
-            Ok(shared) => Backend::Sdl(shared),
-            #[cfg(windows)]
-            Err(error) => {
-                bevy::log::warn!("SDL gamepad input unavailable ({error}); using XInput");
-                Backend::XInput
-            }
-            #[cfg(not(windows))]
-            Err(error) => {
-                bevy::log::error!("SDL gamepad input unavailable: {error}");
-                Backend::Unavailable
-            }
-        }
-    })
 }
 
 pub(crate) fn poll_cached(
@@ -510,54 +443,10 @@ pub(crate) fn poll_cached(
     cache: &mut CapabilityCache,
 ) -> Result<DevicePacket, DeviceError> {
     assert!(index < 4);
-    match backend() {
-        Backend::Sdl(shared) => {
-            let _ = cache;
-            sdl::poll(shared, index)
-        }
-        #[cfg(windows)]
-        Backend::XInput => windows::poll(index as u32, cache),
-        #[cfg(not(windows))]
-        Backend::Unavailable => Err(DeviceError::Unavailable),
-    }
-}
-
-#[cfg(test)]
-mod conversion_tests {
-    use super::*;
-
-    /// SDL's XInput expansion: byte*257-32768 on the full axis, then the
-    /// gamepad layer rescales -32768..=32767 onto 0..=32767.
-    fn sdl_trigger(byte: u8) -> i16 {
-        let axis = i32::from(byte) * 257 - 32768;
-        ((axis + 32768) * 32767 / 65535) as i16
-    }
-
-    #[test]
-    fn every_trigger_byte_survives_the_sdl_round_trip() {
-        for byte in 0..=255u8 {
-            assert_eq!(xinput_trigger(sdl_trigger(byte)), byte);
-        }
-        assert_eq!(xinput_trigger(-1), 0);
-    }
-
-    #[test]
-    fn stick_y_inversion_restores_xinput_values_without_overflow() {
-        for y in [i16::MIN, -1, 0, 1, 12345, i16::MAX] {
-            assert_eq!(xinput_y(!y), y);
-        }
-        assert_eq!(xinput_y(i16::MIN), i16::MAX);
-    }
-
-    #[test]
-    fn paddle_masks_round_trip_and_names_use_xinput_bits() {
-        set_paddles([0x1000, 0, 0x0100, 0x8000]);
-        assert_eq!(paddles(), [0x1000, 0, 0x0100, 0x8000]);
-        set_paddles([0; 4]);
-        assert_eq!(button_mask("A"), Some(0x1000));
-        assert_eq!(button_mask("left_shoulder"), Some(0x0100));
-        assert_eq!(button_mask("guide"), None);
-    }
+    #[cfg(windows)]
+    return windows::poll(index as u32, cache);
+    #[cfg(not(windows))]
+    return linux::poll(index, cache);
 }
 
 #[cfg(test)]
@@ -566,7 +455,7 @@ mod cache_tests {
     #[test]
     fn capability_cache_refreshes_and_never_caches_errors() {
         let start = std::time::Instant::now();
-        let mut cache = CapabilityCache::<u8>::default();
+        let mut cache = CapabilityCache::default();
         assert_eq!(cache.get(start, || Ok(1)), Ok(1));
         assert_eq!(
             cache.get(start + std::time::Duration::from_millis(999), || panic!(

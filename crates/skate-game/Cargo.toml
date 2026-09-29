@@ -39,6 +39,11 @@ gltf = { version = "=1.4.1", default-features = true }
 # SDL3 gamepad input for every platform, built from source and statically linked.
 sdl3 = { version = "=0.20.0", features = ["build-from-source-static"] }
 
+# Windows reads the pad through Xinput in platform.rs, so gilrs is only needed
+# to reach the same raw state on other hosts.
+[target.'cfg(not(windows))'.dependencies]
+gilrs = { version = "=0.11.2", default-features = false }
+
 [dev-dependencies]
 naga = { version = "=27.0.3", features = ["wgsl-in"] }
 naga_oil = { version = "=0.20.0", default-features = false }

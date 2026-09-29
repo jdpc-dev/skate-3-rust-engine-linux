@@ -1,11 +1,13 @@
 /target/
 /bin/
+/run/
 /logs/
 /.local/
 /settings/
 # TRACE_PLAY.bat's CPU trace output.
 /trace-*.json
 /data/
+/sk3/
 __pycache__/
 *.pyc
 /assets/private/
