@@ -44,7 +44,7 @@ class HudWorkspace(unittest.TestCase):
             self.assertEqual(json.loads((assets/'private/hud-availability.json').read_text())['status'],'unavailable')
             receipt=record(root,'hud')
             self.assertTrue(receipt)
-            self.assertEqual(damaged(root,{'outputs':{'hud':receipt}},exclude=('core','character','environment','maps')),set())
+            self.assertEqual(damaged(root,{'outputs':{'hud':receipt}},exclude=('core','character','environment','maps','audio')),set())
 
     def test_failure_keeps_verified_existing_huds(self):
         with tempfile.TemporaryDirectory() as temp:

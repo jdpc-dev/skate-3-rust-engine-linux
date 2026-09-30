@@ -23,7 +23,7 @@ default = ["dev-dynamic"]
 dev-dynamic = ["bevy/dynamic_linking"]
 
 [dependencies]
-bevy = { workspace = true, features = ["jpeg", "trace", "debug"] }
+bevy = { workspace = true, features = ["jpeg", "trace", "debug", "wav"] }
 tracing-log = "0.2"
 skate-core.workspace = true
 skate-data.workspace = true

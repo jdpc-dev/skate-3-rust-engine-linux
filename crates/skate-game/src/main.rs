@@ -14,6 +14,7 @@ mod scoring_hud;
 mod animation_pose;
 mod app;
 mod assets;
+mod audio;
 mod camera;
 mod config;
 mod setup;

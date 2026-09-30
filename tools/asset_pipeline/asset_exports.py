@@ -84,3 +84,8 @@ def environment(game_root, stage, work, report, log, converted=None):
     report('Preparing global foliage backdrops')
     from .backdrop import convert as write_backdrops
     attempt('backdrops',lambda assets:write_backdrops(game_root,assets,converted))
+
+
+def audio(game_root, stage, work, report, log, converted=None):
+    from .audio import export_audio
+    export_audio(game_root, stage, report, log)

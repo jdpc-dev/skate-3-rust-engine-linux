@@ -14,6 +14,7 @@ ROOTS = {
                     'assets/private/render-parameters.json', 'assets/private/exposure.json',
                     'assets/private/exposure-profiles.json', 'assets/private/teleports.json', 'assets/private/environment-status'),
     'maps': ('assets/private/native-props', 'maps.json', 'assets/private/map-status'),
+    'audio': ('assets/private/audio', 'assets/private/audio-availability.json'),
 }
 
 

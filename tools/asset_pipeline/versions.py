@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 
-GROUPS = ('core', 'hud', 'character', 'environment', 'maps')
+GROUPS = ('core', 'hud', 'character', 'environment', 'maps', 'audio')
 COMMON = ('owned_game/**/*.py', 'asset_pipeline/fast_refpack.py', 'asset_pipeline/refpack_native.rs',
           'requirements-setup.txt')
 PARSERS = ('vendor/utt/**/*.py', 'vendor/university/**/*.py', 'vendor/utt/**/*.json', 'vendor/university/**/*.json')
@@ -24,6 +24,7 @@ SOURCES = {
     'maps': PARSERS + ('asset_pipeline/optional_content.py', 'asset_pipeline/map*.py', 'asset_pipeline/dynamic_props.py',
              'asset_pipeline/environment.py', 'asset_pipeline/irradiance.py',
              'asset_pipeline/retail_material.py', 'asset_pipeline/backdrop.py', 'asset_pipeline/sky.py'),
+    'audio': ('asset_pipeline/audio.py',),
 }
 
 

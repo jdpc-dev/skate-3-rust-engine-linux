@@ -104,7 +104,9 @@ The launcher uses `.local/session-marker/assets.path`, or `SKATE3_ASSETS`.
 
 Audio integration emits `SessionMarkerAudio(u64)` with original GlobalFEPlaySound
 IDs: place `0D6C88A3B91C828F`, rejected place `66B3AFE3B602918C`, return
-`7F135F9FD28F7F21`. There is currently no audio consumer in this implementation.
+`7F135F9FD28F7F21`. Gameplay audio now exists (see [audio.md](audio.md)), but these
+front-end IDs still have no consumer: the decoded rolling and one-shot clips are
+addressed by disc asset name, not by GlobalFEPlaySound event id.
 
 ## Verification and limits
 
