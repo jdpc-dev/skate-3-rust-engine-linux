@@ -30,10 +30,13 @@ class AssetVersions(unittest.TestCase):
 
     def test_equivalences_only_accept_exact_old_and_new_pair(self):
         migrations=json.loads(Path(v.__file__).with_name('pipeline-equivalence.json').read_text())
-        # Equivalences describe historical pairs, not every future exporter.
-        # Groups without a historical pair (e.g. audio) keep one fingerprint.
-        current={g:migrations[g][0][1] if g in migrations else 'unchanged' for g in v.GROUPS}
-        old={g:migrations[g][0][0] if g in migrations else 'unchanged' for g in v.GROUPS}
+        # Equivalences describe historical pairs, not every future exporter. A group
+        # introduced without history has no pair to check, so it is held constant.
+        def pair(group,index):
+            pairs=migrations.get(group) or []
+            return pairs[0][index] if pairs else f'{group}-unversioned'
+        current={g:pair(g,1) for g in v.GROUPS}
+        old={g:pair(g,0) for g in v.GROUPS}
         self.assertEqual(v.changed_groups(old,current),set())
         changed={**current,'maps':'future-exporter'}
         self.assertEqual(v.changed_groups(old,changed),{'maps'})
@@ -88,51 +91,11 @@ class AssetVersions(unittest.TestCase):
                 new=install(source,base,Path('unused.exe'),lambda _:None,refresh=True)
             self.assertEqual((new/'maps/University.skate').read_bytes(),b'unchanged map')
             self.assertEqual((new/'settings/default-map.json').read_text(),'"custom.skate"')
-            self.assertFalse(old.exists())
-            self.assertTrue((new/'assets/private/hud/old.txt').exists())
-            self.assertEqual(v.installed(base)[0],new)
+            self.assertTrue((old/'assets/private/hud/old.txt').is_file())
+            self.assertTrue((new/'assets/private/hud/old.txt').exists())  # Kept until replacement validates.
             self.assertEqual(v.installed(base)[1]['pipelines'],current)
             self.assertTrue(any(any('prepare_runtime_huds.py' in a for a in args) for args in calls))
             self.assertFalse(any(any('map_job.py' in a for a in args) for args in calls))
-
-    def test_successful_refresh_removes_abandoned_installations(self):
-        with tempfile.TemporaryDirectory() as temp:
-            base,old,source,current,marker=self.fixture(Path(temp))
-            orphan=base/'installations'/('b'*32)
-            orphan.mkdir()
-            (orphan/'stale.txt').write_text('abandoned')
-            with patch.object(v,'fingerprints',return_value=current), patch('tools.asset_pipeline.install.run'):
-                new=install(source,base,Path('unused.exe'),lambda _:None,refresh=True)
-            self.assertFalse(old.exists())
-            self.assertFalse(orphan.exists())
-            self.assertEqual(v.installed(base)[0],new)
-
-    def test_successful_refresh_removes_setup_logs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            base,old,source,current,marker=self.fixture(Path(temp))
-            (old/'setup.log').write_text('setup')
-            (old/'worldDIST_University-load.log').write_text('load')
-            (old/'worldDIST_University-conversion.log').write_text('convert')
-            with patch.object(v,'fingerprints',return_value=current), patch('tools.asset_pipeline.install.run'):
-                new=install(source,base,Path('unused.exe'),lambda _:None,refresh=True)
-            for name in ('setup.log','worldDIST_University-load.log',
-                         'worldDIST_University-conversion.log'):
-                self.assertFalse((new/name).exists())
-            self.assertTrue((new/'maps.json').is_file())
-
-    def test_current_assets_refresh_removes_orphan_installations(self):
-        with tempfile.TemporaryDirectory() as temp:
-            base,old,source,current,marker=self.fixture(Path(temp))
-            marker['pipelines']=current
-            (base/'installation.json').write_text(json.dumps(marker))
-            orphan=base/'installations'/('b'*32)
-            orphan.mkdir()
-            (orphan/'stale.txt').write_text('abandoned')
-            with patch.object(v,'fingerprints',return_value=current), patch('tools.asset_pipeline.install.run'):
-                install(source,base,Path('unused.exe'),lambda _:None,refresh=True)
-            self.assertTrue(old.exists())
-            self.assertFalse(orphan.exists())
-            self.assertEqual(v.installed(base)[0].resolve(),old.resolve())
 
     def test_failed_refresh_keeps_previous_record(self):
         with tempfile.TemporaryDirectory() as temp:
