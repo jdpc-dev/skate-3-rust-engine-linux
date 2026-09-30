@@ -127,6 +127,15 @@ try {
         build = $build; tag = $tag; revision = (& git rev-parse HEAD).Trim(); files = $files; asset_pipelines = $assetPipelines; character_customiser = $characterCustomiser
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$stage/release.json" -Encoding utf8
     Copy-Item -LiteralPath "$stage/release.json" -Destination (Join-Path $ProjectRoot 'target/release.json')
+    # Seed fresh downloads with Skyline only. Mods stay outside release.json:
+    # the updater deliberately never owns or overwrites a user's mod packages.
+    $bundledModFiles = @(& git ls-files -- 'mods/Skyline_Drive_Mod/')
+    if ($LASTEXITCODE -ne 0 -or $bundledModFiles.Count -eq 0) { throw 'Tracked Skyline package missing' }
+    foreach ($relative in $bundledModFiles) {
+        $destination = Join-Path $stage $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $ProjectRoot $relative) -Destination $destination
+    }
     $zip = Join-Path $ProjectRoot 'target/skate3rust-windows-x64.zip'
     Compress-Archive -LiteralPath $stage -DestinationPath $zip -Force
     (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower() + '  skate3rust-windows-x64.zip' |
