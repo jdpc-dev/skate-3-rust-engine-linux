@@ -189,9 +189,8 @@ mod linux {
         }
     }
 
-    /// gilrs normalizes every axis onto `-1..=1` and Linux reverses Y so that
-    /// pushing the stick up reads negative. Xinput hands the converter an `i16`
-    /// with up positive, so flip Y and span the full asymmetric range.
+    /// gilrs normalizes every axis onto `-1..=1`; Xinput's `i16` is asymmetric,
+    /// so span the full range without saturating or wrapping.
     fn axis_i16(value: f32) -> i16 {
         let value = value.clamp(-1.0, 1.0);
         let scaled = if value < 0.0 {
@@ -278,9 +277,9 @@ mod linux {
                 buttons |= 1 << 3;
             }
             let vertical = axis_value(&gamepad, Axis::DPadY);
-            if vertical <= -DPAD_THRESHOLD {
+            if vertical >= DPAD_THRESHOLD {
                 buttons |= 1 << 0;
-            } else if vertical >= DPAD_THRESHOLD {
+            } else if vertical <= -DPAD_THRESHOLD {
                 buttons |= 1 << 1;
             }
 
@@ -295,11 +294,11 @@ mod linux {
                     ],
                     left: [
                         axis_i16(axis_value(&gamepad, Axis::LeftStickX)),
-                        axis_i16(-axis_value(&gamepad, Axis::LeftStickY)),
+                        axis_i16(axis_value(&gamepad, Axis::LeftStickY)),
                     ],
                     right: [
                         axis_i16(axis_value(&gamepad, Axis::RightStickX)),
-                        axis_i16(-axis_value(&gamepad, Axis::RightStickY)),
+                        axis_i16(axis_value(&gamepad, Axis::RightStickY)),
                     ],
                 },
                 subtype: STANDARD_GAMEPAD,
