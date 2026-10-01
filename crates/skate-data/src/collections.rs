@@ -24,9 +24,44 @@ pub struct Collection {
 pub struct Collections {
     version: u32,
     collections: Vec<Collection>,
+    /// (numeric class, numeric key) -> index of the FIRST matching entry, i.e.
+    /// exactly what a linear scan in vector order finds. Built on first lookup,
+    /// reset by every mutation. A full scan per lookup hashed every entry's
+    /// names and cost seconds per skater/camera load.
+    #[serde(skip)]
+    index: std::sync::OnceLock<std::collections::HashMap<(String, String), usize>>,
 }
 
 impl Collections {
+    /// Replace one profile with a child of a base profile, without editing assets.
+    pub fn override_profile(&mut self, class: &str, target: &str, base: &str,
+        fields: BTreeMap<String, Field>) -> Result<(), String> {
+        let id = crate::attrib_hash::numeric_name(class);
+        let base_id = crate::attrib_hash::numeric_name(base);
+        if !self.collections.iter().any(|c| crate::attrib_hash::numeric_name(&c.class_name)==id
+            && crate::attrib_hash::numeric_name(&c.key)==base_id) { return Err("Missing base profile".into()); }
+        let target_id = crate::attrib_hash::numeric_name(target);
+        self.collections.retain(|c| !(crate::attrib_hash::numeric_name(&c.class_name)==id
+            && crate::attrib_hash::numeric_name(&c.key)==target_id));
+        self.collections.push(Collection {class_name:class.into(),key:target.into(),parent:base.into(),
+            fields,source:"host custom profile".into(),sha256:String::new()});
+        self.index = std::sync::OnceLock::new();
+        Ok(())
+    }
+
+    fn entry(&self, class_id: &str, key_id: &str) -> Option<&Collection> {
+        let index = self.index.get_or_init(|| {
+            let mut index = std::collections::HashMap::with_capacity(self.collections.len());
+            for (position, item) in self.collections.iter().enumerate() {
+                index
+                    .entry((crate::attrib_hash::numeric_name(&item.class_name), crate::attrib_hash::numeric_name(&item.key)))
+                    .or_insert(position);
+            }
+            index
+        });
+        index.get(&(class_id.to_owned(), key_id.to_owned())).map(|&position| &self.collections[position])
+    }
+
     pub fn entries(&self) -> &[Collection] {
         &self.collections
     }
@@ -60,14 +95,11 @@ impl Collections {
         let field_id = crate::attrib_hash::numeric_name(name);
         let mut current = key;
         for _ in 0..=self.collections.len() {
+            // Equal names have equal numeric names, so matching on numeric
+            // names alone is the same predicate the original scan used.
             let current_id = crate::attrib_hash::numeric_name(current);
             let item = self
-                .collections
-                .iter()
-                .find(|c| {
-                    (c.class_name == class || crate::attrib_hash::numeric_name(&c.class_name) == class_id)
-                        && (c.key == current || crate::attrib_hash::numeric_name(&c.key) == current_id)
-                })
+                .entry(&class_id, &current_id)
                 .ok_or_else(|| format!("Missing stock collection {class}/{current}"))?;
             if let Some(field) = item.fields.get(name).or_else(|| {
                 item.fields.iter().find(|(key, _)| crate::attrib_hash::numeric_name(key) == field_id)
@@ -177,5 +209,111 @@ mod tests {
         })).unwrap();
         assert_eq!(data.float(&crate::attrib_hash::numeric_name("example"),
             &crate::attrib_hash::numeric_name("child"), &crate::attrib_hash::numeric_name("value")).unwrap(), 1.0);
+    }
+
+    /// The original linear scan, kept as the reference for the index.
+    fn field_linear<'a>(data: &'a Collections, class: &str, key: &str, name: &str) -> Result<&'a Field, String> {
+        let class_id = crate::attrib_hash::numeric_name(class);
+        let field_id = crate::attrib_hash::numeric_name(name);
+        let mut current = key;
+        for _ in 0..=data.collections.len() {
+            let current_id = crate::attrib_hash::numeric_name(current);
+            let item = data.collections.iter().find(|c| {
+                (c.class_name == class || crate::attrib_hash::numeric_name(&c.class_name) == class_id)
+                    && (c.key == current || crate::attrib_hash::numeric_name(&c.key) == current_id)
+            }).ok_or_else(|| format!("Missing stock collection {class}/{current}"))?;
+            if let Some(field) = item.fields.get(name).or_else(|| {
+                item.fields.iter().find(|(key, _)| crate::attrib_hash::numeric_name(key) == field_id).map(|(_, f)| f)
+            }) {
+                return Ok(field);
+            }
+            if item.parent.is_empty() {
+                return Err(format!("Missing stock field {class}/{key}/{name}"));
+            }
+            current = &item.parent;
+        }
+        Err(format!("Cyclic stock collection inheritance {class}/{key}"))
+    }
+
+    fn same(data: &Collections, class: &str, key: &str, name: &str) {
+        match (data.field(class, key, name), field_linear(data, class, key, name)) {
+            (Ok(a), Ok(b)) => assert!(std::ptr::eq(a, b), "{class}/{key}/{name}: different field"),
+            (Err(a), Err(b)) => assert_eq!(a, b, "{class}/{key}/{name}"),
+            (a, b) => panic!("{class}/{key}/{name}: indexed {a:?} vs linear {b:?}"),
+        }
+    }
+
+    fn row(class: &str, key: &str, parent: &str, value: &str) -> serde_json::Value {
+        serde_json::json!({"class": class, "key": key, "parent": parent, "source": "fixture", "sha256": "",
+            "fields": {"value": {"type": "EA::Reflection::Float", "data": value}}})
+    }
+
+    #[test]
+    fn index_matches_linear_scan_for_spellings_inheritance_and_errors() {
+        let n = crate::attrib_hash::numeric_name;
+        let data: Collections = serde_json::from_value(serde_json::json!({"version": 1, "collections": [
+            row("example", "child", &n("base"), "00000001"),
+            row("example", "base", "", "00000002"),
+            row(&n("other"), "base", "", "00000003"),
+            row("example", "loop_a", "loop_b", "00000004"),
+            row("example", "loop_b", "loop_a", "00000005"),
+        ]})).unwrap();
+        for class in ["example", &n("example"), "other", &n("other"), "missing"] {
+            for key in ["child", "base", &n("base"), "0x0", "loop_a", "missing"] {
+                for name in ["value", &n("value"), "absent"] {
+                    same(&data, class, key, name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn index_keeps_the_first_duplicate_like_the_scan() {
+        // load() rejects duplicates, but a directly deserialized vault may not.
+        let n = crate::attrib_hash::numeric_name;
+        let data: Collections = serde_json::from_value(serde_json::json!({"version": 1, "collections": [
+            row("example", "dup", "", "00000001"),
+            row(&n("example"), &n("dup"), "", "00000002"),
+        ]})).unwrap();
+        same(&data, "example", "dup", "value");
+        assert_eq!(data.field("example", "dup", "value").unwrap().data, "00000001");
+    }
+
+    #[test]
+    fn override_profile_resets_the_index() {
+        let mut data: Collections = serde_json::from_value(serde_json::json!({"version": 1, "collections": [
+            row("physics_mode", "easy", "", "00000001"),
+            row("physics_mode", "test", "", "00000002"),
+        ]})).unwrap();
+        assert_eq!(data.field("physics_mode", "test", "value").unwrap().data, "00000002"); // builds the index
+        let mut fields = BTreeMap::new();
+        fields.insert("value".to_owned(), Field { type_name: "EA::Reflection::Float".into(), data: "00000009".into() });
+        data.override_profile("physics_mode", "test", "easy", fields).unwrap();
+        assert_eq!(data.field("physics_mode", "test", "value").unwrap().data, "00000009");
+        same(&data, "physics_mode", "test", "value");
+        same(&data, "physics_mode", "easy", "value");
+    }
+
+    /// Every (entry, field name) in the real converted vault, including names
+    /// only reachable through inheritance, resolves identically.
+    #[test]
+    #[ignore = "requires SKATE3_ASSET_ROOT pointing to converted stock assets"]
+    fn index_matches_linear_scan_on_private_collections() {
+        let root = std::env::var_os("SKATE3_ASSET_ROOT").expect("set SKATE3_ASSET_ROOT");
+        let data = Collections::load(std::path::Path::new(&root)).unwrap();
+        let mut names_by_class: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for item in &data.collections {
+            names_by_class.entry(crate::attrib_hash::numeric_name(&item.class_name)).or_default()
+                .extend(item.fields.keys().cloned());
+        }
+        let mut checked = 0usize;
+        for item in &data.collections {
+            for name in &names_by_class[&crate::attrib_hash::numeric_name(&item.class_name)] {
+                same(&data, &item.class_name, &item.key, name);
+                checked += 1;
+            }
+        }
+        eprintln!("compared {checked} lookups over {} entries", data.collections.len());
+        assert!(checked > 0);
     }
 }
