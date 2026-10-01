@@ -63,8 +63,8 @@ fn ground_texture() -> Option<Image> {
     Some(image)
 }
 
-/// Planar texture coordinates from each quad's own edges, so arbitrarily
-/// oriented faces (ramps, half-pipe walls) tile at a consistent scale.
+/// Planar texture coordinates from the quad's own edges, so the tiling scale
+/// stays consistent with whichever world orientation the surface has.
 fn quad_uvs(vertices: &[skate_core::math::Vector3; 4]) -> [[f32; 2]; 4] {
     let points = vertices.map(|v| Vec3::new(v.x, v.y, v.z));
     let u_axis = (points[1] - points[0]).normalize_or_zero();
@@ -89,7 +89,11 @@ pub(crate) fn spawn_test_world(
         Color::srgb(0.30, 0.43, 0.48),
         Color::srgb(0.24, 0.48, 0.31),
     ];
-    for (quads, color) in crate::physics::ground::surfaces().into_iter().zip(colors) {
+    // Only the landing floor (the first group) carries the ground texture. The
+    // starting box, ramp, half-pipe and rails keep their original flat colours.
+    let surfaces = crate::physics::ground::surfaces();
+    for (index, (quads, color)) in surfaces.into_iter().zip(colors).enumerate() {
+        let textured = index == 0 && texture.is_some();
         let mut positions = Vec::new();
         let mut uvs = Vec::new();
         for vertices in quads {
@@ -97,21 +101,21 @@ pub(crate) fn spawn_test_world(
             for i in [0, 2, 1, 0, 3, 2] {
                 let v = vertices[i];
                 positions.push([v.x, v.y, v.z]);
-                uvs.push(uv[i]);
+                if textured { uvs.push(uv[i]); }
             }
         }
         let mut mesh = Mesh::new(
             bevy::mesh::PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::default(),
         )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        if textured { mesh = mesh.with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs); }
         mesh.compute_flat_normals();
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: if texture.is_some() { Color::WHITE } else { color },
-                base_color_texture: texture.clone(),
+                base_color: if textured { Color::WHITE } else { color },
+                base_color_texture: if textured { texture.clone() } else { None },
                 perceptual_roughness: 0.9,
                 double_sided: true,
                 cull_mode: None,

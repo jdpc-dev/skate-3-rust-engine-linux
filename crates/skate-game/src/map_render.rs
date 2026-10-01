@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_world_ground_uses_repeating_texture() {
+    fn only_test_world_floor_uses_repeating_texture() {
         let mut world = world();
         let mut scene = PreparedScene::new(&world);
         scene.prepare(None, std::path::Path::new("unused"));
@@ -436,12 +436,13 @@ mod tests {
         assert_eq!(images.len(), 1);
         let (texture, image) = images.iter().next().unwrap();
         assert_eq!(image.size(), UVec2::new(256, 256));
-        for (_, material) in world.resource::<Assets<StandardMaterial>>().iter() {
-            assert_eq!(material.base_color_texture.as_ref().map(|h| h.id()), Some(texture));
-        }
-        for (_, mesh) in world.resource::<Assets<Mesh>>().iter() {
-            assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some(), "ground needs UVs");
-        }
+        let textured: Vec<_> = world.resource::<Assets<StandardMaterial>>().iter()
+            .filter(|(_, m)| m.base_color_texture.is_some()).collect();
+        assert_eq!(textured.len(), 1, "only the floor takes the texture");
+        assert_eq!(textured[0].1.base_color_texture.as_ref().map(|h| h.id()), Some(texture));
+        let with_uvs = world.resource::<Assets<Mesh>>().iter()
+            .filter(|(_, m)| m.attribute(Mesh::ATTRIBUTE_UV_0).is_some()).count();
+        assert_eq!(with_uvs, 1, "only the floor needs UVs");
         MapAssets::retire(&mut world);
         assert_eq!(world.resource::<Assets<Image>>().len(), 0);
     }
