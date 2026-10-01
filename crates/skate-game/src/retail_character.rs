@@ -194,6 +194,7 @@ fn spawn_shadow_sources(commands: &mut Commands, light: Vec3) {
     // World + skater casters, sampled only by the character shader.
     commands.spawn((
         ShadowSource,
+        crate::graphics_menu::ShadowCasterLight,
         Name::new("Character shadow visibility"),
         DirectionalLight {
             illuminance: 0.,
@@ -213,6 +214,7 @@ fn spawn_shadow_sources(commands: &mut Commands, light: Vec3) {
     // this separate map so baked building/terrain shadows are not re-applied.
     commands.spawn((
         ShadowSource,
+        crate::graphics_menu::ShadowCasterLight,
         Name::new("Player shadow onto baked world"),
         DirectionalLight {
             illuminance: 0.,

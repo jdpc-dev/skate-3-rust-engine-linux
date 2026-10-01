@@ -178,3 +178,43 @@ including changing culling, MSAA and internal resolution together. The explicit
 GPU lightmap cache regression test also passed. The startup
 image was visually inspected. Manual menu testing was interrupted by the user
 stopping Computer Use, so live UI toggling has not been visually verified.
+
+## Low-end graphics options
+
+The game menu exposes optional, lossy settings for weak GPUs. All default to
+the original full-quality behavior and are persisted with the other graphics
+settings in `settings/graphics.json`.
+
+| Menu row | Values | Effect |
+| --- | --- | --- |
+| Shadows | Default / Reduced / Off | `Reduced` halves the directional shadow-map size (2048→1024, point 1024→512); `Off` disables shadow casting on the map sun and both character shadow sources. |
+| Texture detail | 100% / 50% | `50%` box-filters every non-cube texture to half dimensions before upload and adds a mip chain to albedo. Applied on the next map load. |
+| Environment props | On / Off | Skips the render-only `native-props` package at map load. No collision is involved. |
+| Backdrops | On / Off | Skips the render-only `native-backdrops` package at map load. |
+| Draw distance | Full / 150 m / 75 m | Hides a static batch only when its whole axis-aligned box lies beyond the limit, so nothing inside the range pops. |
+
+A/B overrides for reproducible measurements: `SKATE_SHADOWS=0|1|2`,
+`SKATE_TEXTURES=50|100`, `SKATE_PROPS=0|1`, `SKATE_BACKDROPS=0|1`,
+`SKATE_DISTANCE=full|medium|short`.
+
+`Shadows` and `Draw distance` apply immediately. `Texture detail`,
+`Environment props` and `Backdrops` apply when a map is loaded or reloaded.
+Draw distance culls by nearest point on each batch's bounds; because batches
+merge all geometry sharing a material, a batch that spans into the visible
+range is always kept. This is a conservative approximation of a draw-distance
+cut and does not require splitting the merged batches.
+
+### Measured on an AMD Vega 8 (Ryzen 5 3500U), University, 1280x720, MSAA off, occlusion off, uncapped development build
+
+| Configuration | Average FPS | Frame p95 |
+| --- | ---: | ---: |
+| Defaults (saved settings, VSync off) | 21–31 | 111 ms |
+| Shadows Off | 41.5 | 39.5 ms |
+| Shadows Off + draw distance 150 m (rotating camera) | 73.9 | 24.3 ms |
+| Shadows Off + draw distance 75 m (rotating camera) | 81.7 | 20.7 ms |
+| Shadows Off + 150 m + props/backdrops off (stationary) | 69.8 | 28.9 ms |
+
+Shadow casting and per-batch draw culling were the dominant costs on this iGPU;
+texture detail showed no measurable change at 720p. These are single-machine
+observations, not guarantees: run-to-run variation is significant and the
+unstaged development build still carries debug assertions and overflow checks.

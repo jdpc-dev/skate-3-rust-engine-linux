@@ -24,6 +24,35 @@ use std::collections::HashMap;
 #[path = "retail_shadow_geometry.rs"]
 pub(crate) mod shadow_geometry;
 
+/// World-space bounds of one static render batch. Used by the optional draw
+/// distance culling; a batch is only hidden when it lies entirely beyond the
+/// limit, so no visible geometry inside the range can pop out.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct MapBatchBounds {
+    pub center: Vec3,
+    pub half: Vec3,
+}
+impl MapBatchBounds {
+    fn from_vertices(positions: impl Iterator<Item = [f32; 3]>) -> Self {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let mut any = false;
+        for p in positions {
+            any = true;
+            for i in 0..3 {
+                lo[i] = lo[i].min(p[i]);
+                hi[i] = hi[i].max(p[i]);
+            }
+        }
+        if !any {
+            return Self { center: Vec3::ZERO, half: Vec3::ZERO };
+        }
+        Self {
+            center: Vec3::from_array(std::array::from_fn(|i| (lo[i] + hi[i]) * 0.5)),
+            half: Vec3::from_array(std::array::from_fn(|i| (hi[i] - lo[i]) * 0.5)),
+        }
+    }
+}
+
 pub(crate) fn validate_runtime(map: &SkateMap) -> Result<(), String> {
     let _span = info_span!("validate_map").entered();
     let archive = retail_archive(map)?;
@@ -561,6 +590,7 @@ pub(crate) fn spawn(
     retail_materials: &mut impl crate::map_render::AssetSink<crate::retail_render::RetailWorldMaterial>,
     images: &mut impl crate::map_render::AssetSink<Image>,
     tuning: &crate::retail_render::MaterialTuning,
+    texture_scale: u32,
 ) {
     // Texture roles have different transfer functions even when sharing a record.
     let _span = info_span!("prepare_map_geometry_and_textures").entered();
@@ -580,9 +610,25 @@ pub(crate) fn spawn(
                 .entry((id, role))
                 .or_insert_with(|| {
                     let source = &map.textures[id as usize - 1];
+                    let cube = role == 5;
+                    // Low-end option halves D2 textures before upload. Cube faces
+                    // keep their authored atlas; collision never reads textures.
+                    let downscale = texture_scale <= 50
+                        && !cube
+                        && source.width >= 4
+                        && source.height >= 4;
+                    let (width, height) = if downscale {
+                        (source.width / 2, source.height / 2)
+                    } else {
+                        (source.width, source.height)
+                    };
+                    let downsampled = downscale.then(|| {
+                        crate::retail_render::downsample_half(&source.rgba, source.width, source.height)
+                    });
+                    let rgba: &[u8] = downsampled.as_deref().unwrap_or(&source.rgba);
                     let (format, bytes) = if role == 1 {
-                        let mut bytes = Vec::with_capacity(source.rgba.len() * 2);
-                        for pixel in source.rgba.chunks_exact(4) {
+                        let mut bytes = Vec::with_capacity(rgba.len() * 2);
+                        for pixel in rgba.chunks_exact(4) {
                             for (i, &byte) in pixel.iter().enumerate() {
                                 let v = f32::from(byte) / 255.;
                                 let linear = if i == 3 { 1. } else { v * v * 4. };
@@ -599,16 +645,15 @@ pub(crate) fn spawn(
                             } else {
                                 TextureFormat::Rgba8Unorm
                             },
-                            source.rgba.clone(),
+                            rgba.to_vec(),
                         )
                     };
-                    let cube = role == 5;
-                    let height = if cube { source.height / 6 } else { source.height };
+                    let face_height = if cube { source.height / 6 } else { height };
                     let layers = if cube { 6 } else { 1 };
                     let mut image = Image::new(
                         Extent3d {
-                            width: source.width,
-                            height,
+                            width,
+                            height: face_height,
                             depth_or_array_layers: layers,
                         },
                         TextureDimension::D2,
@@ -616,8 +661,10 @@ pub(crate) fn spawn(
                         format,
                         RenderAssetUsages::RENDER_WORLD,
                     );
-                    if role == 3 || role == 6 || cube {
-                        let (bytes, levels) = crate::retail_render::mip_chain(&source.rgba, source.width, height, layers);
+                    // Albedo and data roles keep a mip chain; it reduces
+                    // minification aliasing and texture-cache pressure.
+                    if role == 0 || role == 3 || role == 6 || cube {
+                        let (bytes, levels) = crate::retail_render::mip_chain(rgba, width, face_height, layers);
                         image.data = Some(bytes);
                         image.texture_descriptor.mip_level_count = levels;
                     }
@@ -707,9 +754,11 @@ pub(crate) fn spawn(
                 warn!("SKATE material {} tangent generation: {error}", m.name);
             }
         }
+        // Static identity transforms, so world bounds equal the local bounds.
+        let bounds = MapBatchBounds::from_vertices(vertices.iter().map(|v| v.position));
         if let Some(material) = retail {
             let material = retail_materials.add(material);
-            commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default()));
+            commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default(), bounds));
             continue;
         }
         // Vertex colours above carry retail decal coordinates, never PBR tint.
@@ -746,6 +795,7 @@ pub(crate) fn spawn(
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),
             Transform::default(),
+            bounds,
         ));
         if let Some(image) = texture(m.textures[1], 1) {
             entity.insert(bevy::pbr::Lightmap {

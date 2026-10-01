@@ -31,6 +31,73 @@ const RESOLUTIONS: &[(u32, u32)] = &[
 const SCALES: &[u32] = &[25, 50, 67, 75, 85, 100];
 const DAY_SPEEDS: &[u32] = &[0, 1, 10, 30, 60, 120, 360, 720];
 const LIMITS: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
+const SHADOW_QUALITIES: &[ShadowQuality] = &[
+    ShadowQuality::Default,
+    ShadowQuality::Reduced,
+    ShadowQuality::Off,
+];
+const TEXTURE_DETAILS: &[u32] = &[100, 50];
+const DRAW_DISTANCES: &[DrawDistance] = &[
+    DrawDistance::Full,
+    DrawDistance::Medium,
+    DrawDistance::Short,
+];
+/// Camera distance past which a static batch entirely out of range is hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum DrawDistance {
+    Full,
+    Medium,
+    Short,
+}
+impl Default for DrawDistance {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+impl DrawDistance {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full",
+            Self::Medium => "150 m",
+            Self::Short => "75 m",
+        }
+    }
+    pub(crate) fn meters(self) -> f32 {
+        match self {
+            Self::Full => 0.,
+            Self::Medium => 150.,
+            Self::Short => 75.,
+        }
+    }
+}
+
+/// Marks directional lights whose shadow casting is controlled by the graphics
+/// menu. Spawn sites add this so the setting also covers maps loaded later.
+#[derive(Component)]
+pub(crate) struct ShadowCasterLight;
+
+/// Coarse shadow budget. `Reduced` lowers the shadow-map resolution; `Off`
+/// disables shadow casting entirely. Both are lossy and purely cosmetic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ShadowQuality {
+    Default,
+    Reduced,
+    Off,
+}
+impl Default for ShadowQuality {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+impl ShadowQuality {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Reduced => "Reduced",
+            Self::Off => "Off",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +108,11 @@ struct GraphicsSettings {
     samples: u32,
     fps: u32,
     occlusion: bool,
+    shadows: ShadowQuality,
+    texture_detail: u32,
+    env_props: bool,
+    backdrops: bool,
+    draw_distance: DrawDistance,
     hour: f32,
     day_speed: u32,
     ambient_level: Option<u32>,
@@ -54,6 +126,11 @@ impl Default for GraphicsSettings {
             samples: 4,
             fps: 0,
             occlusion: true,
+            shadows: ShadowQuality::Default,
+            texture_detail: 100,
+            env_props: true,
+            backdrops: true,
+            draw_distance: DrawDistance::Full,
             hour: 12.,
             day_speed: 60,
             ambient_level: None,
@@ -77,10 +154,38 @@ impl GraphicsSettings {
         if !LIMITS.contains(&self.fps) {
             self.fps = 0;
         }
+        if !TEXTURE_DETAILS.contains(&self.texture_detail) {
+            self.texture_detail = 100;
+        }
         self
     }
     fn internal_size(&self, window: UVec2) -> UVec2 {
         (window * self.scale / 100).max(UVec2::ONE)
+    }
+    pub(crate) fn settings_path(asset_root: &std::path::Path) -> PathBuf {
+        asset_root
+            .parent()
+            .unwrap_or(asset_root)
+            .join("settings/graphics.json")
+    }
+    pub(crate) fn load_for(asset_root: &std::path::Path) -> Self {
+        match std::fs::read(Self::settings_path(asset_root)) {
+            Ok(bytes) => serde_json::from_slice::<Self>(&bytes)
+                .unwrap_or_default()
+                .validated(),
+            Err(_) => Self::default(),
+        }
+    }
+}
+
+/// Scene quality for render preparation, read from the persisted graphics
+/// settings. Collision and simulation are unaffected.
+pub(crate) fn scene_quality_for(asset_root: &std::path::Path) -> crate::map_render::SceneQuality {
+    let settings = GraphicsSettings::load_for(asset_root);
+    crate::map_render::SceneQuality {
+        texture_scale: settings.texture_detail,
+        env_props: settings.env_props,
+        backdrops: settings.backdrops,
     }
 }
 #[derive(Resource)]
@@ -123,6 +228,9 @@ pub(crate) fn gameplay_active(menu: Option<Res<Menu>>) -> bool {
 struct SceneTarget(Handle<Image>);
 #[derive(Resource)]
 struct FramePacer(Instant);
+/// Current draw distance in metres; `0` disables culling.
+#[derive(Resource, Default)]
+pub(crate) struct DrawDistanceMeters(pub f32);
 #[derive(Component)]
 struct MenuRoot;
 #[derive(Component)]
@@ -143,9 +251,11 @@ pub(crate) struct GraphicsMenuPlugin;
 impl Plugin for GraphicsMenuPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FramePacer(Instant::now()))
+            .init_resource::<DrawDistanceMeters>()
             .add_systems(PostStartup, setup.in_set(PresentationSetup))
             .add_systems(PreUpdate, interact.in_set(MenuInput).after(bevy::input::InputSystems))
             .add_systems(Update, (crate::map_render::advance_day, apply, labels).chain())
+            .add_systems(Update, cull_distant_batches.after(apply))
             .add_systems(PostUpdate, crate::map_render::position_celestial_bodies.before(bevy::transform::TransformSystems::Propagate))
             .add_systems(Last, pace);
     }
@@ -159,11 +269,7 @@ fn setup(
     adapter: Res<RenderAdapter>,
     mut time: ResMut<Time<Virtual>>,
 ) {
-    let path = config
-        .asset_root
-        .parent()
-        .unwrap_or(&config.asset_root)
-        .join("settings/graphics.json");
+    let path = GraphicsSettings::settings_path(&config.asset_root);
     let settings = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice::<GraphicsSettings>(&bytes).unwrap_or_else(|e| {
             warn!("Graphics settings: {e}");
@@ -194,6 +300,33 @@ fn setup(
     match std::env::var("SKATE_OCCLUSION").as_deref() {
         Ok("0") => settings.occlusion = false,
         Ok("1") => settings.occlusion = true,
+        _ => {}
+    }
+    match std::env::var("SKATE_SHADOWS").as_deref() {
+        Ok("0") | Ok("off") => settings.shadows = ShadowQuality::Off,
+        Ok("1") | Ok("reduced") => settings.shadows = ShadowQuality::Reduced,
+        Ok("2") | Ok("default") => settings.shadows = ShadowQuality::Default,
+        _ => {}
+    }
+    match std::env::var("SKATE_TEXTURES").as_deref() {
+        Ok("50") | Ok("half") => settings.texture_detail = 50,
+        Ok("100") | Ok("full") => settings.texture_detail = 100,
+        _ => {}
+    }
+    match std::env::var("SKATE_PROPS").as_deref() {
+        Ok("0") | Ok("off") => settings.env_props = false,
+        Ok("1") | Ok("on") => settings.env_props = true,
+        _ => {}
+    }
+    match std::env::var("SKATE_BACKDROPS").as_deref() {
+        Ok("0") | Ok("off") => settings.backdrops = false,
+        Ok("1") | Ok("on") => settings.backdrops = true,
+        _ => {}
+    }
+    match std::env::var("SKATE_DISTANCE").as_deref() {
+        Ok("full") => settings.draw_distance = DrawDistance::Full,
+        Ok("medium") => settings.draw_distance = DrawDistance::Medium,
+        Ok("short") => settings.draw_distance = DrawDistance::Short,
         _ => {}
     }
     if !supported_msaa.contains(&settings.samples) {
@@ -239,7 +372,7 @@ fn setup(
             BackgroundColor(Color::srgb(0.035,0.055,0.08)))).with_children(|panel| {
             panel.spawn((Text::new("GAME MENU"),TextFont {font_size:32.,..default()},TextColor(Color::WHITE)));
             panel.spawn((Text::new("GAMEPLAY & GRAPHICS"),TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.4,0.85,0.85))));
-            for i in 0..17 {
+            for i in 0..22 {
                 panel.spawn((Button, MenuRow(i), Node {width:percent(100),min_height:px(26),padding:UiRect::all(px(3)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(5)),..default()},
                     BackgroundColor(Color::srgb(0.08,0.11,0.15)))).with_children(|row| {
                     row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -329,7 +462,7 @@ pub(crate) fn interact(
         }
     }
     if menu.open {
-        let rows = if menu.daylight { 4 } else if menu.multiplayer { 11 } else { 17 };
+        let rows = if menu.daylight { 4 } else if menu.multiplayer { 11 } else { 22 };
         if !panel.focused {
         if keys.just_pressed(KeyCode::ArrowUp) || nav.pressed & 1 != 0 {
             menu.selected = (menu.selected + rows - 1) % rows;
@@ -430,6 +563,11 @@ pub(crate) fn interact(
                 }
                 3 => menu.settings.fps = cycle(LIMITS, menu.settings.fps, direction),
                 4 => menu.settings.occlusion = !menu.settings.occlusion,
+                17 => menu.settings.shadows = cycle(SHADOW_QUALITIES, menu.settings.shadows, direction),
+                18 => { menu.settings.texture_detail = cycle(TEXTURE_DETAILS, menu.settings.texture_detail, direction); menu.status = "Texture detail applies after loading a map".into(); },
+                19 => { menu.settings.env_props = !menu.settings.env_props; menu.status = "Environment props apply after loading a map".into(); },
+                20 => { menu.settings.backdrops = !menu.settings.backdrops; menu.status = "Backdrops apply after loading a map".into(); },
+                21 => menu.settings.draw_distance = cycle(DRAW_DISTANCES, menu.settings.draw_distance, direction),
                 5 => {
                     menu.difficulty = cycle(&Difficulty::ALL, menu.difficulty, direction);
                     physics.set_difficulty(menu.difficulty);
@@ -471,7 +609,7 @@ pub(crate) fn interact(
                 _ => {}
             }
         }
-        if (row < 5 && !menu.multiplayer && !menu.daylight && !day_action) || (day_action && row < 3) {
+        if ((row < 5 || (17..=21).contains(&row)) && !menu.multiplayer && !menu.daylight && !day_action) || (day_action && row < 3) {
             let save = (|| -> Result<(), String> {
                 std::fs::create_dir_all(menu.path.parent().unwrap()).map_err(|e| e.to_string())?;
                 std::fs::write(
@@ -499,6 +637,10 @@ fn apply(
     target: Res<SceneTarget>,
     mut images: ResMut<Assets<Image>>,
     mut cameras: Query<(Entity, &mut Msaa), With<Camera3d>>,
+    mut lights: Query<&mut DirectionalLight, With<ShadowCasterLight>>,
+    mut dir_shadow: Option<ResMut<bevy::light::DirectionalLightShadowMap>>,
+    mut point_shadow: Option<ResMut<bevy::light::PointLightShadowMap>>,
+    mut draw_distance: Option<ResMut<DrawDistanceMeters>>,
     mut previous: Local<Option<GraphicsSettings>>,
 ) {
     if previous
@@ -544,7 +686,60 @@ fn apply(
             });
         }
     }
+    // Shadow budget is applied every frame so lights spawned by a map load or
+    // transition pick it up without needing a settings change.
+    let (shadows_enabled, dir_size, point_size) = match menu.settings.shadows {
+        ShadowQuality::Default => (true, 2048, 1024),
+        ShadowQuality::Reduced => (true, 1024, 512),
+        ShadowQuality::Off => (false, 2048, 1024),
+    };
+    if let Some(dir_shadow) = dir_shadow.as_mut() {
+        if dir_shadow.size != dir_size {
+            dir_shadow.size = dir_size;
+        }
+    }
+    if let Some(point_shadow) = point_shadow.as_mut() {
+        if point_shadow.size != point_size {
+            point_shadow.size = point_size;
+        }
+    }
+    for mut light in &mut lights {
+        if light.shadows_enabled != shadows_enabled {
+            light.shadows_enabled = shadows_enabled;
+        }
+    }
+    if let Some(draw_distance) = draw_distance.as_mut() {
+        draw_distance.0 = menu.settings.draw_distance.meters();
+    }
     *previous = Some(menu.settings.clone());
+}
+
+/// Hides static batches whose nearest point lies entirely beyond the draw
+/// distance. Nearest-point testing keeps every batch containing visible
+/// geometry, so this never removes anything inside the range.
+fn cull_distant_batches(
+    camera: Query<&GlobalTransform, With<crate::camera::GameplayCamera>>,
+    distance: Res<DrawDistanceMeters>,
+    mut batches: Query<(&crate::skate_world::MapBatchBounds, &mut Visibility)>,
+) {
+    let limit = distance.0;
+    let cam = camera.iter().next().map(GlobalTransform::translation);
+    for (bounds, mut visibility) in &mut batches {
+        let target = match (limit > 0., cam) {
+            (true, Some(cam)) => {
+                let nearest = (cam - bounds.center).abs() - bounds.half;
+                let dist = nearest.max(Vec3::ZERO).length();
+                // Small hysteresis so a batch on the boundary does not flicker.
+                let was_visible = *visibility != Visibility::Hidden;
+                let threshold = if was_visible { limit } else { limit * 0.9 };
+                if dist <= threshold { Visibility::Inherited } else { Visibility::Hidden }
+            }
+            _ => Visibility::Inherited,
+        };
+        if *visibility != target {
+            *visibility = target;
+        }
+    }
 }
 fn labels(
     menu: Res<Menu>,
@@ -669,6 +864,11 @@ fn labels(
                 15 => "Mods".into(),
                 14 => "Teleport…".into(),
                 16 => "Day & night…".into(),
+                17 => format!("Shadows               {}", s.shadows.label()),
+                18 => format!("Texture detail        {}%", s.texture_detail),
+                19 => format!("Environment props     {}", if s.env_props { "On" } else { "Off" }),
+                20 => format!("Backdrops             {}", if s.backdrops { "On" } else { "Off" }),
+                21 => format!("Draw distance         {}", s.draw_distance.label()),
                 _ => "Multiplayer".into(),
             }
         };

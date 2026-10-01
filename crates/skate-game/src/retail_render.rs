@@ -486,6 +486,30 @@ pub(crate) fn mip_chain(rgba: &[u8], width: u32, height: u32, layers: u32) -> (V
 }
 
 
+/// Box-filters decoded UNORM RGBA to half width/height. Used by the low-end
+/// texture detail option before upload; lossy and independent of collision.
+pub(crate) fn downsample_half(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut out = vec![0u8; nw * nh * 4];
+    for y in 0..nh {
+        for x in 0..nw {
+            for c in 0..4 {
+                let mut sum = 0u32;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let sy = (y * 2 + dy).min(h - 1);
+                        let sx = (x * 2 + dx).min(w - 1);
+                        sum += rgba[(sy * w + sx) * 4 + c] as u32;
+                    }
+                }
+                out[(y * nw + x) * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 pub(crate) struct MaterialTuning {
     rows: BTreeMap<String, Vec<[f32; 4]>>,
@@ -502,3 +526,33 @@ impl MaterialTuning {
 }
 
 pub(crate) fn world_changed(mut messages: MessageReader<crate::map_transition::WorldChanged>) -> bool { messages.read().count() != 0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downsample_half_box_filters_and_halves_dimensions() {
+        // 4x2 image: left half black, right half white (opaque).
+        let mut rgba = vec![0u8; 4 * 2 * 4];
+        for y in 0..2 {
+            for x in 2..4 {
+                let i = (y * 4 + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let out = downsample_half(&rgba, 4, 2);
+        assert_eq!(out.len(), 2 * 1 * 4);
+        // First column averages two black pixels; second averages two white.
+        assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&out[4..8], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn downsample_half_handles_odd_dimensions() {
+        let rgba = vec![10u8; 3 * 5 * 4];
+        let out = downsample_half(&rgba, 3, 5);
+        assert_eq!(out.len(), 1 * 2 * 4);
+        assert!(out.iter().all(|&b| b == 10));
+    }
+}

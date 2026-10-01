@@ -11,9 +11,15 @@ pub(crate) fn spawn_backdrop(
     materials: &mut impl crate::map_render::AssetSink<StandardMaterial>,
     retail_materials: &mut impl crate::map_render::AssetSink<super::RetailWorldMaterial>,
     images: &mut impl crate::map_render::AssetSink<Image>,
+    quality: crate::map_render::SceneQuality,
 ) {
-    for folder in ["native-backdrops", "native-props"] {
-        spawn_package(name, asset_root, folder, commands, meshes, materials, retail_materials, images);
+    for (folder, enabled) in [
+        ("native-backdrops", quality.backdrops),
+        ("native-props", quality.env_props),
+    ] {
+        if enabled {
+            spawn_package(name, asset_root, folder, commands, meshes, materials, retail_materials, images, quality.texture_scale);
+        }
     }
 }
 
@@ -26,6 +32,7 @@ fn spawn_package(
     materials: &mut impl crate::map_render::AssetSink<StandardMaterial>,
     retail_materials: &mut impl crate::map_render::AssetSink<super::RetailWorldMaterial>,
     images: &mut impl crate::map_render::AssetSink<Image>,
+    texture_scale: u32,
 ) {
     let path = asset_root.join("private").join(folder).join(format!("{name}.skate"));
     if !path.is_file() {
@@ -47,5 +54,5 @@ fn spawn_package(
         return;
     }
     info!("SKATE_BACKDROP: {name} {folder} triangles={}", map.geometry.indices.len() / 3);
-    crate::skate_world::spawn(&map, commands, meshes, materials, retail_materials, images, &super::MaterialTuning::load(asset_root));
+    crate::skate_world::spawn(&map, commands, meshes, materials, retail_materials, images, &super::MaterialTuning::load(asset_root), texture_scale);
 }

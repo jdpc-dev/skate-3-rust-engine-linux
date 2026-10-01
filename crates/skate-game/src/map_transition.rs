@@ -94,6 +94,7 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
     let config = world.resource::<Config>();
     let root = config.asset_root.clone();
     let difficulty = config.difficulty;
+    let quality = crate::graphics_menu::scene_quality_for(&root);
     let graphs = world.resource::<crate::graph_runtime::StockGraphs>().clone();
     let source = world.resource::<SkaterRuntime>().animation.source.clone();
     let preferences = world.resource::<PlayerControls>().preferences;
@@ -120,7 +121,7 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
                 let rendering = std::thread::Builder::new().name("map-render-loader".into())
                     .spawn_scoped(scope, || {
                         let render_started = Instant::now();
-                        scene.prepare(map.as_ref(), &root);
+                        scene.prepare_scaled(map.as_ref(), &root, quality);
                         render_started.elapsed()
                     }).map_err(|e| format!("Could not start render loader: {e}"))?;
                 let simulation_started = Instant::now();

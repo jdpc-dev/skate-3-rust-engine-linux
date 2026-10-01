@@ -6,6 +6,23 @@ use crate::retail_render::{RetailSkyMaterial, RetailWorldMaterial};
 #[derive(Component)]
 pub(crate) struct MapEntity;
 
+/// Low-end scene options chosen per map load. Render-only; collision and
+/// simulation never read these.
+#[derive(Clone, Copy)]
+pub(crate) struct SceneQuality {
+    /// `100` keeps authored texture sizes; `50` halves D2 textures on upload.
+    pub texture_scale: u32,
+    /// Load the render-only `native-props` supplement.
+    pub env_props: bool,
+    /// Load the render-only `native-backdrops` supplement.
+    pub backdrops: bool,
+}
+impl Default for SceneQuality {
+    fn default() -> Self {
+        Self { texture_scale: 100, env_props: true, backdrops: true }
+    }
+}
+
 pub(crate) trait AssetSink<A: Asset> {
     fn add(&mut self, asset: A) -> Handle<A>;
 }
@@ -86,7 +103,17 @@ impl PreparedScene {
             materials: StagedAssets::new(world), retail: StagedAssets::new(world),
             sky: StagedAssets::new(world), images: StagedAssets::new(world) }
     }
+    #[cfg(test)]
     pub fn prepare(&mut self, map: Option<&skate_data::skate_map::SkateMap>, root: &std::path::Path) {
+        self.prepare_scaled(map, root, SceneQuality::default());
+    }
+    /// Like [`Self::prepare`] but applies the low-end scene quality options.
+    pub fn prepare_scaled(
+        &mut self,
+        map: Option<&skate_data::skate_map::SkateMap>,
+        root: &std::path::Path,
+        quality: SceneQuality,
+    ) {
         // Every scene starts with the same environment defaults. Map-specific
         // resources below overwrite these, including after a native scene.
         self.commands.insert_resource(ClearColor(Color::srgb(0.065, 0.08, 0.10)));
@@ -95,9 +122,9 @@ impl PreparedScene {
         });
         if let Some(map) = map {
             crate::skate_world::spawn(map, &mut self.commands, &mut self.meshes,
-                &mut self.materials, &mut self.retail, &mut self.images, &crate::retail_render::MaterialTuning::load(root));
+                &mut self.materials, &mut self.retail, &mut self.images, &crate::retail_render::MaterialTuning::load(root), quality.texture_scale);
             if crate::retail_render::RetailScene::for_map(map) {
-                crate::retail_render::spawn_backdrop(&map.name, root, &mut self.commands, &mut self.meshes, &mut self.materials, &mut self.retail, &mut self.images);
+                crate::retail_render::spawn_backdrop(&map.name, root, &mut self.commands, &mut self.meshes, &mut self.materials, &mut self.retail, &mut self.images, quality);
                 crate::retail_render::spawn_sky(&map.name, root, &mut self.commands,
                     &mut self.meshes, &mut self.images, &mut self.sky, &mut self.retail);
             } else {
@@ -257,6 +284,7 @@ fn custom_lighting(map: &skate_data::skate_map::SkateMap, commands: &mut SceneCo
     commands.insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness, ..default() });
     commands.spawn((
         Name::new("Custom map sun/moon"),
+        crate::graphics_menu::ShadowCasterLight,
         DayEnvironment { values: map.environment.to_vec(), sky: None, sun_direction: orbit(map.environment[11], map.environment[10]) },
         DirectionalLight { color, illuminance, shadows_enabled: true, affects_lightmapped_mesh_diffuse: false, ..default() },
         transform,
