@@ -132,6 +132,23 @@ is opened or a valid saved profile is found. The profile lives at
 file and rename. Legacy profiles without a gender field are interpreted as male.
 Map restarts reuse the same asset/settings root and reload the saved profile.
 
+`Save a copy` on the root page, or the Y button, writes the current draft to
+`settings/characters/skater-<UTC timestamp>.json` and leaves the live profile
+untouched. Each copy is a complete self-contained profile rather than a diff, so
+it can be backed up off the machine and restored by copying it over
+`settings/character.json`. Nothing is uploaded automatically; copying the file to
+cloud storage is a manual step.
+
+Tops are split across the T-shirts, Shirts, Hoodies, Jackets and Sweaters pages,
+which all write the same `OuterTorso` slot. Every one of those pages lists `No
+top` first, backed by the authored bare-torso model. Selecting it clears the
+`Arm` and `InnerTorso` slots, so hoodie and jacket sleeves disappear along with
+the top instead of being left on the arms. Taking a top off is therefore
+available from the page the top was chosen on, not only from T-shirts. Hats,
+glasses, necklaces, wristwear and accessories offer a plain `None`; pants and
+shoes have no authored bare model, so those pages deliberately do not offer an
+entry that could not resolve.
+
 ## Asset preparation and validation
 
 Retail payloads, catalogues, converted parts and machine paths remain private.

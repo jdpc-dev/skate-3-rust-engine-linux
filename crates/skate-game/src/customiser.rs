@@ -220,6 +220,7 @@ const BACK: usize = usize::MAX;
 const NEXT: usize = usize::MAX - 1;
 const PREV: usize = usize::MAX - 2;
 const RESET: usize = usize::MAX - 3;
+const SAVE_COPY: usize = usize::MAX - 4;
 pub(crate) struct CustomiserPlugin;
 impl Plugin for CustomiserPlugin {
     fn build(&self, app: &mut App) {
@@ -333,7 +334,7 @@ fn menu(lib: &Library, extras: Vec<Entry>) -> Entry {
         {
             entries.push(choice("None", json!({"selections":{slot:Value::Null}})));
         }
-        if title == "T-shirts" {
+        if slot == "OuterTorso" {
             for (id, p) in &lib.models {
                 if p.slot == "OuterTorso" && p.flag("TopType").is_empty() {
                     entries.push(Entry { gender:Some(p.flag("Gender").into()),
@@ -760,6 +761,50 @@ fn option_index(entry: &Entry, profile: &Value) -> Option<usize> {
     })
 }
 
+/// UTC calendar stamp for a user-facing backup file name, so a saved copy is
+/// recognisable in a file browser. Avoids pulling in a date-time dependency.
+fn stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}-{:02}-{:02}-{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// Writes the current draft next to the live profile as a dated copy, so the
+/// skater can be backed up by hand without overwriting the autosaved profile.
+fn save_copy(state: &Customiser) -> Result<std::path::PathBuf, String> {
+    let folder = state
+        .settings
+        .parent()
+        .ok_or("Missing settings directory")?
+        .join("characters");
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let path = folder.join(format!("skater-{}.json", stamp(secs)));
+    let body = serde_json::to_vec_pretty(&state.draft).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("pending.json");
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn interact(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -826,6 +871,7 @@ fn interact(
     let mut back = keys.just_pressed(KeyCode::Escape)
         || keys.just_pressed(KeyCode::Backspace)
         || nav.pressed & 0x2000 != 0;
+    let mut copy = false;
     let mut movement = 0;
     if keys.just_pressed(KeyCode::ArrowUp) || nav.pressed & 1 != 0 {
         movement -= 1;
@@ -883,6 +929,7 @@ fn interact(
                             state.redraw = true;
                         }
                     }
+                    SAVE_COPY => copy = true,
                     i => {
                         state.selected = visible.iter().position(|v| *v == i).unwrap_or(0);
                         action = Some((i, 0));
@@ -898,6 +945,17 @@ fn interact(
                 action = Some((adjust.0, adjust.1));
             }
         }
+    }
+    if state.path.is_empty() && (keys.just_pressed(KeyCode::KeyS) || nav.pressed & 0x8000 != 0) {
+        copy = true;
+    }
+    if copy {
+        match save_copy(&state) {
+            Ok(path) => state.status = format!("Saved a copy: {}", path.display()),
+            Err(e) => state.status = format!("Could not save a copy: {e}"),
+        }
+        state.redraw = true;
+        return;
     }
     if back {
         state.search.clear();
@@ -1233,8 +1291,12 @@ fn draw(
                 ),
                 (PREV, "‹"),
                 (NEXT, "›"),
+                (SAVE_COPY, "Save a copy"),
             ] {
-                if id != BACK && visible.len() <= state.page_size {
+                if id == SAVE_COPY && !state.path.is_empty() {
+                    continue;
+                }
+                if (id == PREV || id == NEXT) && visible.len() <= state.page_size {
                     continue;
                 }
                 footer
@@ -1280,7 +1342,8 @@ fn draw(
         });
         p.spawn((
             Text::new(if state.path.is_empty() {
-                "Right stick: Rotate   •   Done saves and resumes."
+                "Right stick: Rotate   •   Done saves and resumes
+Y saves a copy to settings/characters"
             } else {
                 "↑↓ Browse   ←→ Change   Right stick: Rotate
 Type to search"
@@ -1392,6 +1455,133 @@ mod tests {
             assert_eq!(parts.resolve(&p).unwrap_err(), "Invalid clothing colour");
         }
     }
+    fn test_material() -> Value {
+        json!({"name":"m","flags":{},"diffuse":"","alpha":false,
+            "tint":[0.4,0.5,0.6],"metallic":0.,"roughness":0.7})
+    }
+    /// A hoodie must be removable from every top page, not just T-shirts, and the
+    /// bare torso asset has to drop the sleeves it was hiding.
+    #[test]
+    fn customiser_every_top_page_can_take_the_top_off() {
+        let library: Library = serde_json::from_value(json!({
+            "models":{
+                "head":{"slot":"Rostral","name":"Head","flags":{"Gender":"male"},"materials":["head"],"scene":""},
+                "bare":{"slot":"OuterTorso","name":"Arms Wholetorso","flags":{"Gender":"male"},
+                    "materials":["bare"],"scene":""},
+                "hoodie":{"slot":"OuterTorso","name":"Hoodie","flags":{"Gender":"male","TopType":"hoody",
+                    "ArmModelRequired":"shoulder"},"materials":["hood"],"scene":""},
+                "sleeves":{"slot":"Arm","name":"Sleeves","flags":{"Gender":"male",
+                    "ArmModelType":"shoulder"},"materials":["arm"],"scene":""},
+                "trousers":{"slot":"Pants","name":"Jeans","flags":{"Gender":"male"},"materials":["pants"],"scene":""}},
+            "materials":{"head":test_material(),"bare":test_material(),"hood":test_material(),
+                "arm":test_material(),"pants":test_material()},
+            "defaults":{},"morphs":[]
+        })).unwrap();
+        let parts = Parts::for_test(library);
+        let index = menu(&parts.library, vec![]);
+        let clothes = index.children.iter().position(|e| e.label == "Clothes").unwrap();
+        let page = |name: &str| -> &Entry {
+            index.children[clothes]
+                .children
+                .iter()
+                .find(|e| e.label == name)
+                .unwrap()
+        };
+        // A hoodie on, sleeves on, is the state the player gets stuck in.
+        let worn = json!({"gender":"male","selections":{
+            "Rostral":{"asset_id":"head","material_id":"head"},
+            "OuterTorso":{"asset_id":"hoodie","material_id":"hood"},
+            "Arm":{"asset_id":"sleeves","material_id":"arm"}}});
+        let resolved = parts.resolve(&worn).unwrap();
+        assert_eq!(resolved["selections"]["OuterTorso"]["asset_id"], "hoodie");
+        assert!(resolved["selections"].get("Arm").is_some(), "hoodie keeps its sleeves");
+        for name in ["T-shirts", "Shirts", "Hoodies", "Jackets", "Sweaters"] {
+            let bare = page(name)
+                .children
+                .iter()
+                .find(|e| e.label == "No top")
+                .unwrap_or_else(|| panic!("{name} must offer a way to take the top off"));
+            let mut profile = resolved.clone();
+            merge(&mut profile, bare.patch.as_ref().unwrap());
+            let after = parts
+                .resolve(&profile)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(after["selections"]["OuterTorso"]["asset_id"], "bare", "{name}");
+            assert!(
+                after["selections"].get("Arm").is_none(),
+                "{name}: bare torso must drop the hoodie sleeves"
+            );
+            assert_eq!(after["selections"]["Rostral"]["asset_id"], "head", "{name}");
+        }
+        // Only OuterTorso has an authored bare model, so other slots must not gain
+        // an entry that resolves to a non-existent model.
+        for name in ["Pants & shorts", "Shoes"] {
+            assert!(
+                !page(name).children.iter().any(|e| e.label == "No top"),
+                "{name} must not offer an unresolvable bare torso"
+            );
+        }
+        // Hats already offered a plain "None".
+        assert!(page("Hats").children.iter().any(|e| e.label == "None"));
+    }
+    #[test]
+    fn customiser_backup_stamp_is_a_calendar_date() {
+        for (secs, expected) in [
+            (0, "1970-01-01-00-00-00"),
+            (951_782_400, "2000-02-29-00-00-00"),
+            (1_759_274_400, "2025-09-30-23-20-00"),
+            (1_788_398_400, "2026-09-03-01-20-00"),
+        ] {
+            assert_eq!(stamp(secs), expected);
+        }
+    }
+    /// The backup must be a complete profile on disk that the game can reload.
+    #[test]
+    fn customiser_save_copy_writes_a_reloadable_profile() {
+        let dir = std::env::temp_dir().join(format!(
+            "skate-copy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let library: Library = serde_json::from_value(json!({
+            "models":{
+                "head":{"slot":"Rostral","name":"Head","flags":{"Gender":"male"},"materials":["head"],"scene":""}},
+            "materials":{"head":test_material()},"defaults":{},"morphs":[]
+        })).unwrap();
+        let parts = Parts::for_test(library);
+        let draft = json!({"gender":"male","selections":{
+            "Rostral":{"asset_id":"head","material_id":"head"}},"morphs":{},"colours":{}});
+        let state = Customiser {
+            open: true, enabled: true, just_opened: false, preview_yaw: 0.,
+            index: Entry::default(), path: vec![], selected: 0, page_size: 6,
+            search: String::new(), draft: draft.clone(), settings: dir.join("character.json"),
+            status: String::new(), redraw: false,
+        };
+        let path = save_copy(&state).unwrap();
+        assert!(path.starts_with(dir.join("characters")), "got {}", path.display());
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("skater-") && name.ends_with(".json"), "got {name}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let saved: Value = serde_json::from_slice(body.as_bytes()).unwrap();
+        assert_eq!(saved, draft, "backup must be the whole draft, not a diff");
+        assert_eq!(parts.resolve(&saved).unwrap(), parts.resolve(&draft).unwrap());
+        // Restoring is a plain copy back over the live profile.
+        std::fs::copy(&path, dir.join("character.json")).unwrap();
+        let reloaded: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("character.json")).unwrap()).unwrap();
+        assert!(parts.resolve(&reloaded).is_ok());
+        // No temp file may be left behind for the next save to trip over.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("characters"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("pending"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn customiser_owned_menu_presets_tattoos_and_search() {
         let Ok(path) = std::env::var("SKATE_CAC_TEST_LIBRARY") else {
@@ -1462,6 +1652,32 @@ mod tests {
                 parts.resolve(&restored).unwrap(),
                 parts.resolve(&state.draft).unwrap()
             );
+            // Every real top page must offer a bare torso that drops the sleeves.
+            state.path = vec![];
+            let clothes = state.index.children.iter().position(|e| e.label == "Clothes").unwrap();
+            let worn = parts.resolve(&state.draft).unwrap();
+            for top in ["T-shirts", "Shirts", "Hoodies", "Jackets", "Sweaters"] {
+                let page = state.index.children[clothes]
+                    .children
+                    .iter()
+                    .position(|e| e.label == top)
+                    .unwrap();
+                // One "No top" per body type; only the matching one is selectable.
+                let bare = state.index.children[clothes].children[page]
+                    .children
+                    .iter()
+                    .find(|e| e.label == "No top" && e.gender.as_deref() == Some(gender))
+                    .unwrap_or_else(|| panic!("{top} offers no way to take the top off"));
+                let mut profile = worn.clone();
+                merge(&mut profile, bare.patch.as_ref().unwrap());
+                let after = parts
+                    .resolve(&profile)
+                    .unwrap_or_else(|e| panic!("{top}: {e}"));
+                let bare_id = bare.patch.as_ref().unwrap()["selections"]["OuterTorso"]["asset_id"].clone();
+                assert_eq!(after["selections"]["OuterTorso"]["asset_id"], bare_id, "{top}");
+                assert_ne!(worn["selections"]["OuterTorso"]["asset_id"], bare_id, "{top}");
+                assert!(after["selections"].get("Arm").is_none(), "{top} kept sleeves");
+            }
         }
     }
 }
