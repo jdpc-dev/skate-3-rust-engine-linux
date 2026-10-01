@@ -132,7 +132,7 @@ impl PreparedScene {
                 celestial_bodies(&mut self.commands, &mut self.meshes, &mut self.materials, &mut self.images);
             }
         } else {
-            crate::world::spawn_test_world(&mut self.commands, &mut self.meshes, &mut self.materials);
+            crate::world::spawn_test_world(&mut self.commands, &mut self.meshes, &mut self.materials, &mut self.images);
         }
     }
     pub fn publish(mut self, world: &mut World) {
@@ -424,6 +424,26 @@ mod tests {
             assert_eq!(world.resource::<Assets<RetailSkyMaterial>>().len(), 0);
             assert_eq!(world.resource::<Assets<Image>>().len(), 0);
         }
+    }
+
+    #[test]
+    fn test_world_ground_uses_repeating_texture() {
+        let mut world = world();
+        let mut scene = PreparedScene::new(&world);
+        scene.prepare(None, std::path::Path::new("unused"));
+        scene.publish(&mut world);
+        let images = world.resource::<Assets<Image>>();
+        assert_eq!(images.len(), 1);
+        let (texture, image) = images.iter().next().unwrap();
+        assert_eq!(image.size(), UVec2::new(256, 256));
+        for (_, material) in world.resource::<Assets<StandardMaterial>>().iter() {
+            assert_eq!(material.base_color_texture.as_ref().map(|h| h.id()), Some(texture));
+        }
+        for (_, mesh) in world.resource::<Assets<Mesh>>().iter() {
+            assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some(), "ground needs UVs");
+        }
+        MapAssets::retire(&mut world);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 0);
     }
 
     #[test]

@@ -27,7 +27,7 @@ fn installed_worlds_prepare_commit_and_retire_without_simulation() {
     };
     let mut world = World::new();
     world.insert_resource(Config { asset_root: root.clone(), verification_capture: None,
-        map: None, map_path: None, difficulty, check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false, multiplayer: Default::default(), map_fingerprint: crate::config::map_fingerprint(None).unwrap() });
+        map: None, map_path: None, difficulty, check_assets: false, start_paused: false, teleport: None, multiplayer: Default::default(), map_fingerprint: crate::config::map_fingerprint(None).unwrap() });
     world.insert_resource(CurrentMap::from_package(None, None));
     world.insert_resource(graphs);
     world.insert_resource(physics);
@@ -38,8 +38,8 @@ fn installed_worlds_prepare_commit_and_retire_without_simulation() {
     world.init_resource::<Assets<Mesh>>();
     world.init_resource::<Assets<Image>>();
     world.init_resource::<Assets<StandardMaterial>>();
-    world.init_resource::<Assets<crate::retail_render::WorldMaterial>>();
-    world.init_resource::<Assets<bevy::render::storage::ShaderStorageBuffer>>();
+    world.init_resource::<Assets<crate::retail_render::RetailWorldMaterial>>();
+    world.init_resource::<Assets<crate::retail_render::RetailSkyMaterial>>();
     let character = world.spawn((crate::world::PlayerRoot, Transform::default())).id();
     let mut initial = PreparedScene::new(&world);
     initial.prepare(None, &root);
@@ -82,11 +82,10 @@ fn installed_worlds_prepare_commit_and_retire_without_simulation() {
         assert!(world.resource::<crate::camera::CameraRuntime>().frame.is_none());
         if file.is_none() {
             assert_eq!(world.resource::<Assets<Mesh>>().len(), procedural_meshes);
-            assert_eq!(world.resource::<Assets<Image>>().len(), 0);
-            assert_eq!(world.resource::<Assets<crate::retail_render::WorldMaterial>>().len(), 0);
-            // Material tables are storage buffers now, so they are part of what
-            // retirement has to release (RFC 1 D2).
-            assert_eq!(world.resource::<Assets<bevy::render::storage::ShaderStorageBuffer>>().len(), 0);
+            // The test world's embedded ground texture.
+            assert_eq!(world.resource::<Assets<Image>>().len(), 1);
+            assert_eq!(world.resource::<Assets<crate::retail_render::RetailSkyMaterial>>().len(), 0);
+            assert_eq!(world.resource::<Assets<crate::retail_render::RetailWorldMaterial>>().len(), 0);
             assert_eq!(world.query_filtered::<Entity, With<crate::map_render::MapEntity>>().iter(&world).count(), procedural_entities);
         }
         eprintln!("LIFECYCLE_CHECK generation={} map={file:?} triangles={triangles} entities={} meshes={} images={}",
