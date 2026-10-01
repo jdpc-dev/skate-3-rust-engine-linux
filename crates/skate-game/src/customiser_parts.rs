@@ -482,6 +482,7 @@ impl Parts {
         let rough = m.rough.as_ref().map(|p| load(p, true));
         let opacity = m.opacity.as_ref().map(|p| load(p, true));
         let retail_mask = m.lighting.as_ref().and_then(|l| l.specular.as_ref()).map(|p| load(p, true));
+        let is_hair = m.lighting.as_ref().is_some_and(|l| l.is_hair());
         let retail = m.lighting.as_ref().filter(|l| l.params.len() == 9).map(|l| crate::retail_character::CharacterParams {
             tint: Vec4::from_array(Color::srgb(m.tint[0],m.tint[1],m.tint[2]).to_linear().to_f32_array()),
             options: Vec4::new(f32::from(normal.is_some()), f32::from(retail_mask.is_some()), -1., f32::from(l.is_hair())),
@@ -502,6 +503,12 @@ impl Parts {
                 },
                 metallic: m.metallic,
                 perceptual_roughness: if m.rough.is_some() { 1. } else { m.roughness },
+                // Hair is diffuse fibre, not a dielectric surface. The customiser
+                // never fills retail.light, so hair shading falls through to the
+                // standard PBR path; at the default reflectance its highlights
+                // read as wet gloss. Kill the specular lobe instead of leaving
+                // the hair shinier than the authored Kajiya-Kay response.
+                reflectance: if is_hair { 0. } else { 0.5 },
                 alpha_mode: if m.alpha {
                     AlphaMode::Mask(0.5)
                 } else {
@@ -881,6 +888,8 @@ mod stock_hair_audit {
             let handle=parts.materials[&mid].0.clone();
             let original=materials.get(&handle).unwrap().clone();
             assert_eq!(original.extension.retail.options.w,1.,"{mid} must use hair lighting");
+            assert_eq!(original.base.reflectance,0.,"{mid} must be matte, not glossy");
+            assert_eq!(original.base.metallic,0.,"{mid} is fibre, not metal");
             let dyed=parts.profile_material(&id,&mid,&serde_json::json!({"hair_tint":[1,0,0]}),&materials).unwrap();
             *materials.get_mut(&handle).unwrap()=dyed;
             let restored=parts.profile_material(&id,&mid,&serde_json::json!({}),&materials).unwrap();
@@ -892,6 +901,7 @@ mod stock_hair_audit {
             assert_eq!(restored.extension.hair_opacity,original.extension.hair_opacity);
             assert_eq!(restored.extension.retail_mask,original.extension.retail_mask);
             assert_eq!(restored.base.perceptual_roughness,original.base.perceptual_roughness);
+            assert_eq!(restored.base.reflectance,original.base.reflectance);
             *materials.get_mut(&handle).unwrap()=restored;
             checked.insert(mid);
         }
