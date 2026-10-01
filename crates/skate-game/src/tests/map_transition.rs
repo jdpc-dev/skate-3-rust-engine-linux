@@ -82,7 +82,8 @@ fn installed_worlds_prepare_commit_and_retire_without_simulation() {
         assert!(world.resource::<crate::camera::CameraRuntime>().frame.is_none());
         if file.is_none() {
             assert_eq!(world.resource::<Assets<Mesh>>().len(), procedural_meshes);
-            assert_eq!(world.resource::<Assets<Image>>().len(), 0);
+            // The test world's embedded ground texture.
+            assert_eq!(world.resource::<Assets<Image>>().len(), 1);
             assert_eq!(world.resource::<Assets<crate::retail_render::RetailSkyMaterial>>().len(), 0);
             assert_eq!(world.resource::<Assets<crate::retail_render::RetailWorldMaterial>>().len(), 0);
             assert_eq!(world.query_filtered::<Entity, With<crate::map_render::MapEntity>>().iter(&world).count(), procedural_entities);

@@ -35,11 +35,54 @@ fn spawn(world: &mut World) {
     prepared.publish(world);
 }
 
+/// World-space size, in metres, of one ground texture tile. A visible repeat
+/// gives the flat test course a sense of speed that plain colours cannot.
+const GROUND_TEXTURE_METRES: f32 = 2.0;
+
+/// Repeating checker texture for the test-world ground. The asset is embedded
+/// so it is available even when the runtime reads an installed asset root that
+/// has no source `assets/` directory.
+fn ground_texture() -> Option<Image> {
+    use bevy::{
+        asset::RenderAssetUsages,
+        image::{CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType},
+    };
+    let bytes = include_bytes!("../../../assets/textures/general.png");
+    let mut image = Image::from_buffer(
+        bytes,
+        ImageType::MimeType("image/png"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::default(),
+        RenderAssetUsages::RENDER_WORLD,
+    ).ok()?;
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.address_mode_u = ImageAddressMode::Repeat;
+    sampler.address_mode_v = ImageAddressMode::Repeat;
+    image.sampler = ImageSampler::Descriptor(sampler);
+    Some(image)
+}
+
+/// Planar texture coordinates from each quad's own edges, so arbitrarily
+/// oriented faces (ramps, half-pipe walls) tile at a consistent scale.
+fn quad_uvs(vertices: &[skate_core::math::Vector3; 4]) -> [[f32; 2]; 4] {
+    let points = vertices.map(|v| Vec3::new(v.x, v.y, v.z));
+    let u_axis = (points[1] - points[0]).normalize_or_zero();
+    let v_axis = (points[3] - points[0]).normalize_or_zero();
+    let scale = 1.0 / GROUND_TEXTURE_METRES;
+    points.map(|point| {
+        let offset = point - points[0];
+        [offset.dot(u_axis) * scale, offset.dot(v_axis) * scale]
+    })
+}
+
 pub(crate) fn spawn_test_world(
     commands: &mut crate::map_render::SceneCommands,
     meshes: &mut impl crate::map_render::AssetSink<Mesh>,
     materials: &mut impl crate::map_render::AssetSink<StandardMaterial>,
+    images: &mut impl crate::map_render::AssetSink<Image>,
 ) {
+    let texture = ground_texture().map(|image| images.add(image));
     let colors = [
         Color::srgb(0.16, 0.19, 0.21),
         Color::srgb(0.48, 0.35, 0.22),
@@ -47,21 +90,28 @@ pub(crate) fn spawn_test_world(
         Color::srgb(0.24, 0.48, 0.31),
     ];
     for (quads, color) in crate::physics::ground::surfaces().into_iter().zip(colors) {
-        let positions: Vec<[f32; 3]> = quads.into_iter().flat_map(|vertices| {
-            [0, 2, 1, 0, 3, 2].map(|i| {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        for vertices in quads {
+            let uv = quad_uvs(&vertices);
+            for i in [0, 2, 1, 0, 3, 2] {
                 let v = vertices[i];
-                [v.x, v.y, v.z]
-            })
-        }).collect();
+                positions.push([v.x, v.y, v.z]);
+                uvs.push(uv[i]);
+            }
+        }
         let mut mesh = Mesh::new(
             bevy::mesh::PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::default(),
-        ).with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
         mesh.compute_flat_normals();
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
+                base_color: if texture.is_some() { Color::WHITE } else { color },
+                base_color_texture: texture.clone(),
                 perceptual_roughness: 0.9,
                 double_sided: true,
                 cull_mode: None,
