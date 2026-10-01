@@ -30,7 +30,8 @@ fn spawn(world: &mut World) {
         let mut config = world.resource_mut::<crate::config::Config>();
         (config.map.take(), config.asset_root.clone())
     };
-    prepared.prepare(map.as_ref(), &root);
+    let quality = crate::graphics_menu::scene_quality_for(&root);
+    prepared.prepare_scaled(map.as_ref(), &root, quality);
     prepared.publish(world);
 }
 
