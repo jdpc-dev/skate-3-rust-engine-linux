@@ -1,6 +1,7 @@
 """Fresh/update character publication without a game process or retail data."""
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -100,6 +101,59 @@ class CharacterSetup(unittest.TestCase):
             self.assertEqual(install.call_args.kwargs['game_root'], source)
             prepare.assert_called_once()
             self.assertEqual(prepare.call_args.args[:2], (source, installed/'assets'))
+
+
+class LinuxAssetEntryPoint(unittest.TestCase):
+    """prepare_assets.py is the only Linux entry point, so it must finalize the character stage."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.root, ignore_errors=True))
+        self.base = self.root/'data'
+        self.game = self.root/'sk3-disc'
+        self.executable = self.root/'skate3rust'
+        self.argv = ['prepare_assets.py', '--game-root', str(self.game),
+                     '--output', str(self.base), '--game-exe', str(self.executable)]
+        self.source = patch('tools.asset_pipeline.setup_state.source_directory', return_value=self.game)
+        self.source.start()
+        self.addCleanup(self.source.stop)
+
+    def run_entry_point(self, installed, *extra):
+        import tools.prepare_assets as entry
+        with patch.object(sys, 'argv', self.argv+list(extra)), \
+             patch.object(entry, 'installed', return_value=installed), \
+             patch('tools.asset_pipeline.customiser_setup.install') as install, \
+             patch('tools.asset_pipeline.customiser_setup.prepare') as prepare:
+            entry.main()
+        return install, prepare
+
+    def test_core_prepare_still_finalizes_the_character_stage(self):
+        install, _ = self.run_entry_point(None)
+        install.assert_called_once()
+        self.assertEqual(install.call_args.args[:3], (self.game, self.base, self.executable.resolve()))
+
+    def test_existing_installation_is_refreshed_instead_of_reconverted(self):
+        install, _ = self.run_entry_point((self.base/'installations/old', {}))
+        install.assert_called_once()
+        self.assertIs(install.call_args.kwargs['refresh'], True)
+
+    def test_character_only_updates_the_installed_generation_without_reinstalling(self):
+        root = self.base/'installations/old'
+        install, prepare = self.run_entry_point((root, {}), '--character-only')
+        install.assert_not_called()
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args[:2], (self.game, root/'assets'))
+
+    def test_character_only_requires_a_prepared_installation(self):
+        import tools.prepare_assets as entry
+        with patch.object(sys, 'argv', self.argv+['--character-only']), \
+             patch.object(entry, 'installed', return_value=None), \
+             patch('tools.asset_pipeline.customiser_setup.install') as install, \
+             patch('tools.asset_pipeline.customiser_setup.prepare') as prepare:
+            with self.assertRaises(SystemExit):
+                entry.main()
+        install.assert_not_called()
+        prepare.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

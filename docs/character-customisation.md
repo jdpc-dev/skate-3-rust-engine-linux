@@ -12,7 +12,15 @@ If the base library fails, it keeps a verified previous generation or the stock 
 saved profiles are preserved; interrupted preparation can reuse its own cache.
 Players do not need Python, Blender or development tools.
 
+`assets/private/customisation` is the marker for a prepared copy. When that
+directory is absent, setup prepared core gameplay only, and the customiser
+reports that its assets are unavailable while the stock skater stays in use. See
+[Linux build and play](linux.md) for the `--character-only` command that rebuilds
+this stage alone.
+
 The runtime retains the visible skater if a library is missing or incomplete.
+A missing or unreadable library is logged with the directory that was searched,
+so an unprepared copy is distinguishable from a corrupt one.
 Returning from a native/imported character reapplies the saved outfit and binds
 its visible rigs again. Native models use their own shader parameter rows and
 specular textures, including torso slots absent from the default stock model.

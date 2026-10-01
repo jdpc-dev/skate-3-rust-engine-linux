@@ -49,6 +49,15 @@ fi
 echo "Staging $RunDirectory"
 mkdir -p "$RunDirectory"
 install -m 0755 "$Executable" "$RunDirectory/skate3rust"
+# The character customiser has its own release fingerprint, exactly as the
+# packaged Windows release records it, so a launch can tell an unprepared
+# library from a stale one.
+if python3 -c 'import numpy, PIL' >/dev/null 2>&1; then
+    CharacterCustomiser=$(python3 -m tools.asset_pipeline.customiser_setup --fingerprint)
+    printf '{"character_customiser":"%s"}\n' "$CharacterCustomiser" > "$RunDirectory/release.json"
+else
+    echo "Warning: numpy/Pillow are missing, so release.json cannot record the character customiser fingerprint." >&2
+fi
 # Mods, maps and assets all resolve from the executable directory.
 if [[ -d $ProjectRoot/mods ]]; then
     mkdir -p "$RunDirectory/mods"
@@ -76,5 +85,24 @@ No installation found. Extract your Xbox 360 Skate 3 disc and convert it:
   ./scripts/extract-iso-wine.sh /path/to/skate3.iso ~/sk3-disc
   python3 tools/prepare_assets.py --game-root ~/sk3-disc \\
       --output "$RunDirectory/data" --game-exe "$RunDirectory/skate3rust"
+EOF
+elif ! python3 - "$RunDirectory" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+release,installation=root/'release.json',root/'data'/'installation.json'
+if not release.is_file() or not installation.is_file():raise SystemExit(0)
+expected=json.loads(release.read_text(encoding='utf-8-sig')).get('character_customiser')
+current=root/'data'/json.loads(installation.read_text())['directory']/'assets/private/customisation/current.json'
+prepared=json.loads(current.read_text()).get('fingerprint') if current.is_file() else None
+raise SystemExit(0 if expected is None or prepared==expected else 1)
+PY
+then
+    cat >&2 <<EOF
+
+Character customiser assets are missing or were built by other tools. The skater
+is unchanged until they are prepared:
+
+  python3 tools/prepare_assets.py --game-root ~/sk3-disc \\
+      --output "$RunDirectory/data" --game-exe "$RunDirectory/skate3rust" --character-only
 EOF
 fi

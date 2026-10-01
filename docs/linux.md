@@ -78,9 +78,25 @@ present. If you already have an extracted disc, skip it and point
 `--game-root` at that folder.
 
 `prepare_assets.py` writes the converted installation to `run/data` and records
-`run/data/installation.json`, which the engine reads on launch. Conversion can
-take a while; native RefPack decompression and batched texture decoding keep it
-close to the Windows setup timings.
+`run/data/installation.json`, which the engine reads on launch. It also prepares
+the [character customiser](character-customisation.md) library, so the first
+conversion also builds the owned clothing, bodies, tattoos and pro characters.
+Conversion can take a while; native RefPack decompression and batched texture
+decoding keep it close to the Windows setup timings.
+
+Re-running the same command refreshes the existing installation in place, exactly
+like the Windows setup helper: only changed or damaged asset groups are rebuilt
+and maps are not reconverted. To rebuild just the character customiser, without
+touching any other group:
+
+```bash
+python3 tools/prepare_assets.py --game-root ~/sk3-disc --character-only \
+    --output run/data --game-exe run/skate3rust
+```
+
+If a copy's customiser library is missing or was produced by different tools, the
+game logs the directory it searched and keeps the stock skater. `build-linux.sh`
+prints the `--character-only` command when it detects that state.
 
 ## Play
 
@@ -129,3 +145,7 @@ unavailable and the game still runs silently. See
 - **`wine is required`** — install Wine, or skip ISO extraction and pass an
   already extracted disc to `prepare_assets.py`.
 - **Game exits immediately** — check the newest `run/logs/*.stderr.log`.
+- **"Character assets are unavailable"** — the customiser library was never
+  prepared for this copy, which is what a core-only `prepare_assets.py` run
+  produced. Rebuild just that stage with the `--character-only` command above; it
+  needs roughly 2 GB of disk and leaves maps alone.

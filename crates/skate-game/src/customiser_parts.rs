@@ -530,11 +530,23 @@ pub(crate) fn setup(
     server: Res<AssetServer>,
 ) {
     let directory = asset_directory(&config.asset_root);
-    let library = std::fs::read(directory.join("library-v3.json"))
-    .or_else(|_| std::fs::read(directory.join("library.json")))
-    .ok()
-    .and_then(|b| serde_json::from_slice::<Library>(&b).ok())
-    .unwrap_or_default();
+    let bytes = std::fs::read(directory.join("library-v3.json"))
+        .or_else(|_| std::fs::read(directory.join("library.json")));
+    let library = match bytes {
+        // A silent default here is indistinguishable from an empty catalogue,
+        // which is what made an unprepared copy look like a broken customiser.
+        Ok(bytes) => match serde_json::from_slice::<Library>(&bytes) {
+            Ok(library) => library,
+            Err(error) => {
+                error!("Character library {}: {error}", directory.join("library-v3.json").display());
+                Library::default()
+            }
+        },
+        Err(error) => {
+            warn!("Character library {}: {error}", directory.display());
+            Library::default()
+        }
+    };
     let geometry = library
         .models
         .iter()
@@ -598,7 +610,7 @@ pub(crate) fn update(
     // A missing/failed library is not a valid empty outfit. Never hide the
     // fallback skater until a complete replacement can actually be published.
     if desired.is_empty() || parts.resolve(&preview).is_err() {
-        let message = "Character assets are unavailable. Update this copy's character assets; your skater is unchanged.";
+        let message = "Character assets are unavailable. Update this copy's character assets; your skater is unchanged. See the log for the library path.";
         if state.status != message {
             state.status = message.into();
             state.redraw = true;

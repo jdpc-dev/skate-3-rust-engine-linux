@@ -43,11 +43,11 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
     };
     let existing = installed(&base)?;
     if let Some((assets, marker)) = &existing {
-        if expected.as_ref().is_none_or(|versions| marker.get("pipelines") == Some(versions))
-            && assets.join("private/game.json").is_file()
-            && marker.get("outputs").is_none_or(|groups| groups.as_object().is_some_and(|groups|
-                groups.values().all(|files| receipt_present(assets.parent().unwrap(), files))))
-            && customiser_current(assets, expected_customiser.as_deref()) {
+        if installation_usable(assets, marker, expected.as_ref()) {
+            // An unprepared customiser never invalidates the installation: the
+            // runtime keeps the stock skater, and on hosts without the setup
+            // helper falling through here would make the copy unlaunchable.
+            report_customiser(assets, expected_customiser.as_deref());
             return Ok(assets.clone());
         }
     }
@@ -68,10 +68,28 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if expected.as_ref().is_some_and(|versions| marker.get("pipelines") != Some(versions)) {
         return Err("Setup helper does not match this release's asset extractors. Unpack the complete package.".into());
     }
-    if !customiser_current(&assets, expected_customiser.as_deref()) {
-        return Err("Character customiser preparation did not complete for this release.".into());
-    }
+    report_customiser(&assets, expected_customiser.as_deref());
     Ok(assets)
+}
+
+fn report_customiser(assets: &Path, expected: Option<&str>) {
+    if customiser_current(assets, expected) {
+        return;
+    }
+    // The library is optional at runtime, so this only reports. Naming the
+    // searched directory is the whole diagnosis on a host with no setup helper.
+    eprintln!(
+        "Warning: character customiser was not prepared for this release ({}). \
+         Prepare it with tools/prepare_assets.py; your skater is unchanged.",
+        assets.join("private/customisation").display()
+    );
+}
+
+fn installation_usable(assets: &Path, marker: &serde_json::Value, expected: Option<&serde_json::Value>) -> bool {
+    expected.is_none_or(|versions| marker.get("pipelines") == Some(versions))
+        && assets.join("private/game.json").is_file()
+        && marker.get("outputs").is_none_or(|groups| groups.as_object().is_some_and(|groups|
+            groups.values().all(|files| receipt_present(assets.parent().unwrap(), files))))
 }
 
 fn customiser_current(assets: &Path, expected: Option<&str>) -> bool {
@@ -151,5 +169,27 @@ mod tests {
         assert!(!receipt_present(&root, &serde_json::json!({})));
         assert!(!receipt_present(&root, &serde_json::json!({"../missing": {"size": 0}})));
         assert!(!receipt_present(&root, &serde_json::json!({"nonexistent-skate-setup-test": {"size": 0}})));
+    }
+    #[test]
+    fn an_unprepared_customiser_does_not_invalidate_a_prepared_installation() {
+        let root = std::env::temp_dir().join(format!("sk8-unprepared-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let assets = root.join("installations").join("a".repeat(32)).join("assets");
+        std::fs::create_dir_all(assets.join("private")).unwrap();
+        std::fs::write(assets.join("private/game.json"), "{}").unwrap();
+        std::fs::create_dir_all(assets.parent().unwrap().join("maps")).unwrap();
+        let map = assets.parent().unwrap().join("maps/one.skate");
+        std::fs::write(&map, b"map").unwrap();
+        let marker = serde_json::json!({
+            "pipelines": {"core": "v"},
+            "outputs": {"maps": {"maps/one.skate": {"size": 3}}},
+        });
+        let expected = serde_json::json!({"core": "v"});
+        // No private/customisation exists, so the customiser is unprepared and
+        // report_customiser says so. The install must still be accepted: a
+        // missing customiser is survivable, an unusable install is not.
+        assert!(!customiser_current(&assets, Some("unprepared-fingerprint")));
+        assert!(installation_usable(&assets, &marker, Some(&expected)));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
