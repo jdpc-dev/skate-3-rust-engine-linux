@@ -41,8 +41,9 @@ const GROUND_TEXTURE_METRES: f32 = 2.0;
 
 /// Repeating checker texture for the test-world ground. The asset is embedded
 /// so it is available even when the runtime reads an installed asset root that
-/// has no source `assets/` directory.
-fn ground_texture() -> Option<Image> {
+/// has no source `assets/` directory. `texture_scale` of `50` halves it, matching
+/// the menu's texture-detail option used by retail maps.
+fn ground_texture(texture_scale: u32) -> Option<Image> {
     use bevy::{
         asset::RenderAssetUsages,
         image::{CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType},
@@ -59,7 +60,20 @@ fn ground_texture() -> Option<Image> {
     let mut sampler = ImageSamplerDescriptor::linear();
     sampler.address_mode_u = ImageAddressMode::Repeat;
     sampler.address_mode_v = ImageAddressMode::Repeat;
-    image.sampler = ImageSampler::Descriptor(sampler);
+    if texture_scale <= 50 && image.width() >= 4 && image.height() >= 4 {
+        let (width, height) = (image.width() / 2, image.height() / 2);
+        let half = crate::retail_render::downsample_half(image.data.as_ref()?, width * 2, height * 2);
+        image = Image::new(
+            bevy::render::render_resource::Extent3d { width, height, depth_or_array_layers: 1 },
+            bevy::render::render_resource::TextureDimension::D2,
+            half,
+            image.texture_descriptor.format,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.sampler = ImageSampler::Descriptor(sampler.clone());
+    } else {
+        image.sampler = ImageSampler::Descriptor(sampler);
+    }
     Some(image)
 }
 
@@ -81,8 +95,9 @@ pub(crate) fn spawn_test_world(
     meshes: &mut impl crate::map_render::AssetSink<Mesh>,
     materials: &mut impl crate::map_render::AssetSink<StandardMaterial>,
     images: &mut impl crate::map_render::AssetSink<Image>,
+    texture_scale: u32,
 ) {
-    let texture = ground_texture().map(|image| images.add(image));
+    let texture = ground_texture(texture_scale).map(|image| images.add(image));
     let colors = [
         Color::srgb(0.16, 0.19, 0.21),
         Color::srgb(0.48, 0.35, 0.22),
@@ -94,7 +109,7 @@ pub(crate) fn spawn_test_world(
     let surfaces = crate::physics::ground::surfaces();
     for (index, (quads, color)) in surfaces.into_iter().zip(colors).enumerate() {
         let textured = index == 0 && texture.is_some();
-        let mut positions = Vec::new();
+        let mut positions: Vec<[f32; 3]> = Vec::new();
         let mut uvs = Vec::new();
         for vertices in quads {
             let uv = quad_uvs(&vertices);
@@ -104,6 +119,7 @@ pub(crate) fn spawn_test_world(
                 if textured { uvs.push(uv[i]); }
             }
         }
+        let bounds = crate::skate_world::MapBatchBounds::from_vertices(positions.iter().copied());
         let mut mesh = Mesh::new(
             bevy::mesh::PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::default(),
@@ -122,9 +138,12 @@ pub(crate) fn spawn_test_world(
                 ..default()
             })),
             Transform::default(),
+            bounds,
         ));
     }
     commands.spawn((
+        Name::new("Test world sun"),
+        crate::graphics_menu::ShadowCasterLight,
         DirectionalLight {
             illuminance: 11000.,
             shadows_enabled: true,

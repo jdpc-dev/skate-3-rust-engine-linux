@@ -132,7 +132,7 @@ impl PreparedScene {
                 celestial_bodies(&mut self.commands, &mut self.meshes, &mut self.materials, &mut self.images);
             }
         } else {
-            crate::world::spawn_test_world(&mut self.commands, &mut self.meshes, &mut self.materials, &mut self.images);
+            crate::world::spawn_test_world(&mut self.commands, &mut self.meshes, &mut self.materials, &mut self.images, quality.texture_scale);
         }
     }
     pub fn publish(mut self, world: &mut World) {

@@ -33,7 +33,7 @@ pub(crate) struct MapBatchBounds {
     pub half: Vec3,
 }
 impl MapBatchBounds {
-    fn from_vertices(positions: impl Iterator<Item = [f32; 3]>) -> Self {
+    pub(crate) fn from_vertices(positions: impl Iterator<Item = [f32; 3]>) -> Self {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         let mut any = false;
         for p in positions {

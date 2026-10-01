@@ -986,6 +986,54 @@ mod tests {
         assert_eq!(settings.validated(), GraphicsSettings::default());
     }
     #[test]
+    /// The test world spawns its own sun, so it needs the same marker as the
+    /// retail map sun or Shadows Off would silently do nothing there.
+    #[test]
+    fn test_world_sun_is_a_controlled_shadow_caster() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<crate::retail_render::RetailWorldMaterial>>();
+        world.init_resource::<Assets<crate::retail_render::RetailSkyMaterial>>();
+        let mut scene = crate::map_render::PreparedScene::new(&world);
+        scene.prepare(None, std::path::Path::new("unused"));
+        scene.publish(&mut world);
+        let casters = world
+            .query::<(&DirectionalLight, Has<ShadowCasterLight>)>()
+            .iter(&world)
+            .collect::<Vec<_>>();
+        assert!(!casters.is_empty(), "test world should spawn a sun");
+        for (light, controlled) in casters {
+            assert!(controlled, "every test-world light must be menu-controlled");
+            assert!(light.shadows_enabled, "shadows start enabled");
+        }
+    }
+    #[test]
+    fn shadow_off_disables_every_controlled_caster() {
+        let mut app = App::new();
+        app.insert_resource(SceneTarget(Handle::<Image>::default()))
+            .init_resource::<Assets<Image>>()
+            .insert_resource(Menu {
+                open: false, selected: 0, settings: GraphicsSettings::default(),
+                difficulty: Difficulty::Easy, path: PathBuf::new(), supported_msaa: vec![1], status: String::new(),
+                multiplayer: false, browser: false, daylight: false,
+                maps: vec![crate::map_library::Entry { label: "Test world".into(), path: None }], selected_map: 0,
+            })
+            .init_resource::<DrawDistanceMeters>()
+            .add_systems(Update, apply);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        let light = app.world_mut().spawn((
+            DirectionalLight { shadows_enabled: true, ..default() },
+            ShadowCasterLight,
+        )).id();
+        app.update();
+        assert!(app.world().get::<DirectionalLight>(light).unwrap().shadows_enabled);
+        app.world_mut().resource_mut::<Menu>().settings.shadows = ShadowQuality::Off;
+        app.update();
+        assert!(!app.world().get::<DirectionalLight>(light).unwrap().shadows_enabled);
+    }
+    #[test]
     fn scaled_target_and_cycle_boundaries() {
         let s = GraphicsSettings {
             scale: 50,
