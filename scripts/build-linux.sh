@@ -14,13 +14,16 @@ if ! command -v cargo >/dev/null; then
     exit 1
 fi
 
-# Release builds are opt-in; the dev profile already compiles at opt-level 3.
-Profile=(debug)
-CargoFlags=()
-if [[ ${RELEASE:-0} == 1 ]]; then
-    Profile=(release)
-    CargoFlags=(--release)
-fi
+# Release is the default because the dev profile keeps debug-assertions and
+# overflow-checks enabled, which cost about 15% of frame time on a weak CPU and
+# change nothing about the recovered simulation. Both profiles compile at
+# opt-level 3, so the arithmetic itself is identical. Set PROFILE=debug when
+# chasing a panic with a debugger.
+case ${PROFILE:-release} in
+    release) Profile=(release); CargoFlags=(--release) ;;
+    debug)   Profile=(debug);   CargoFlags=() ;;
+    *) echo "PROFILE must be release or debug" >&2; exit 1 ;;
+esac
 
 echo "Building skate3rust (${Profile[0]} profile)"
 # dev-dynamic is a Windows incremental-build convenience that leaves Bevy

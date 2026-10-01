@@ -218,3 +218,35 @@ Shadow casting and per-batch draw culling were the dominant costs on this iGPU;
 texture detail showed no measurable change at 720p. These are single-machine
 observations, not guarantees: run-to-run variation is significant and the
 unstaged development build still carries debug assertions and overflow checks.
+
+### CPU-side cost reduction
+
+Three findings from a Chrome trace of a 60 FPS frame, recorded on the Vega 8
+machine described above. Percentages are medians of three alternating A/B pairs
+because single runs on this machine vary by more than 10 FPS.
+
+`customiser_parts::update` rebuilt the JSON character preview, the selection
+strings and the per-colour `resolve` validation on every frame even with the
+customiser closed, because its early return sat below that work. With the menu
+closed `preview` is only `draft.clone()`, so comparing `applied` to `draft`
+directly is equivalent and needs no clone. The modding snapshot was likewise
+built three times per frame (PreUpdate, every physics tick, and Update) while
+only live Lua scripts read it; it is now built only when a script is running or
+a rescan could start one, so a newly loaded mod still receives real world state.
+Together these cut **1.23 ms of CPU per frame**, consistent across every A/B
+pair, which is **+1.2% FPS at 720p** and **+2.9% at 25% internal scale**. The
+720p gain is small because that frame is GPU-bound; the saving is headroom.
+
+`command_buffer_generation_tasks` averages 2.13 ms per frame, but the trace
+places **all** of it on the render thread inside `run_graph`,
+`submit_graph_commands` and `main_opaque_pass_3d`, with none on the main
+schedule. It is Bevy's render-graph bookkeeping, not gameplay code: the game
+adds a single custom node (`retail_exposure::ExposureNode`) and spawns a single
+production `Camera3d`, so there is no redundant view multiplying the graph. The
+only lever is draw-call count, which is why batch merging is the remaining
+render-thread opportunity.
+
+Release is now the default build profile. Both profiles compile at `opt-level =
+3` and the test suite is identical (272 passed, 4 pre-existing failures), so the
+simulation arithmetic is unchanged; the 15% is purely the absence of
+debug-assertions and overflow-checks.
