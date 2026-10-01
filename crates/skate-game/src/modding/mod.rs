@@ -98,7 +98,17 @@ impl Plugin for ModdingPlugin {
         panel::install(app);
     }
 }
+/// Building the snapshot walks the player, network and vehicle state and
+/// allocates a JSON tree. Only a live script or a rescan that can start one
+/// ever reads it, so skip the work when neither applies.
 fn snapshot(world: &World) -> serde_json::Value {
+    let manager = &world.resource::<Mods>().manager;
+    if !manager.any_running() && !manager.scan_due() {
+        return serde_json::Value::Null;
+    }
+    build_snapshot(world)
+}
+fn build_snapshot(world: &World) -> serde_json::Value {
     let s = world.resource::<crate::physics::SkaterRuntime>();
     let p = &s.player_input.physical;
     let map = world.resource::<crate::map_transition::CurrentMap>();

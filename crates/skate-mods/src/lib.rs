@@ -71,6 +71,17 @@ impl Manager {
     pub fn root(&self) -> &Path {
         &self.root
     }
+    /// True when a rescan is past its throttle and could start or retire a
+    /// package. Callers use this to decide whether the world snapshot has to be
+    /// rebuilt this tick.
+    pub fn scan_due(&self) -> bool {
+        self.last_scan.elapsed() >= Duration::from_millis(500)
+    }
+    /// True when at least one package has a live script able to read the
+    /// snapshot.
+    pub fn any_running(&self) -> bool {
+        self.packages.values().any(|p| p.running())
+    }
     pub fn new(root: PathBuf, preferences: PathBuf) -> Self {
         Self {
             packages: BTreeMap::new(),
@@ -86,7 +97,7 @@ impl Manager {
         }
     }
     pub fn scan(&mut self, force: bool) {
-        if !force && self.last_scan.elapsed() < Duration::from_millis(500) {
+        if !force && !self.scan_due() {
             return;
         }
         self.last_scan = Instant::now();
