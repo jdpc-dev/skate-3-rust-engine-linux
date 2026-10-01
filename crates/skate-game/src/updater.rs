@@ -12,7 +12,7 @@ pub(crate) struct Updater {
 fn helper_command(recover: bool, automatic: bool) -> Result<(Command, PathBuf, PathBuf), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("Missing program directory")?;
-    if !root.join("release.json").is_file() {
+    if !root.join("release.json").is_file() || !root.join("support/skate3update.exe").is_file() {
         return Err("Updates are available in packaged releases.".into());
     }
     let unique = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();

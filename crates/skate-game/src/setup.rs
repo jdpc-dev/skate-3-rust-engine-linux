@@ -25,137 +25,17 @@ fn installed(base: &Path) -> Result<Option<(PathBuf, serde_json::Value)>, String
     Ok(Some((assets, marker)))
 }
 
-/// Exact match, or an explicit old→new pair from release pipeline_equivalence.
-fn pipeline_group_matches(
-    installed: Option<&serde_json::Value>,
-    expected: &serde_json::Value,
-    group: &str,
-    equivalence: Option<&serde_json::Value>,
-) -> bool {
-    if installed == Some(expected) {
-        return true;
-    }
-    let (Some(old), Some(new)) = (installed.and_then(|v| v.as_str()), expected.as_str()) else {
-        return false;
-    };
-    if old == new {
-        return true;
-    }
-    equivalence
-        .and_then(|table| table.get(group))
-        .and_then(|pairs| pairs.as_array())
-        .is_some_and(|pairs| {
-            pairs.iter().any(|pair| {
-                pair.as_array().is_some_and(|pair| {
-                    pair.len() == 2
-                        && pair[0].as_str() == Some(old)
-                        && pair[1].as_str() == Some(new)
-                })
-            })
-        })
-}
-
-fn pipelines_current(
-    marker: &serde_json::Value,
-    expected: &serde_json::Value,
-    equivalence: Option<&serde_json::Value>,
-) -> bool {
-    if marker.get("pipelines") == Some(expected) {
-        return true;
-    }
-    let installed = marker.get("pipelines").and_then(|v| v.as_object());
-    expected.as_object().is_some_and(|wanted| {
-        wanted.iter().all(|(group, new_hash)| {
-            pipeline_group_matches(installed.and_then(|i| i.get(group)), new_hash, group, equivalence)
-        })
-    })
-}
-
-fn group_outputs_valid(marker: &serde_json::Value, install_root: &Path, group: &str) -> bool {
-    marker
-        .get("outputs")
-        .and_then(|outputs| outputs.get(group))
-        .is_some_and(|files| receipt_present(install_root, files))
-}
-
-/// Program updates may publish new extractor fingerprints even when a prepared
-/// group is still valid. Reuse recorded outputs instead of forcing setup again.
-fn pipelines_acceptable(
-    marker: &serde_json::Value,
-    expected: &serde_json::Value,
-    equivalence: Option<&serde_json::Value>,
-    install_root: &Path,
-) -> bool {
-    if pipelines_current(marker, expected, equivalence) {
-        return true;
-    }
-    let installed = marker.get("pipelines").and_then(|v| v.as_object());
-    expected.as_object().is_some_and(|wanted| {
-        wanted.iter().all(|(group, new_hash)| {
-            pipeline_group_matches(installed.and_then(|i| i.get(group)), new_hash, group, equivalence)
-                || group_outputs_valid(marker, install_root, group)
-        })
-    })
-}
-
-fn stamp_pipelines(
-    base: &Path,
-    marker: &serde_json::Value,
-    expected: &serde_json::Value,
-) -> Result<(), String> {
-    let mut updated = marker.clone();
-    updated["pipelines"] = expected.clone();
-    let bytes = serde_json::to_vec_pretty(&updated).map_err(|e| e.to_string())?;
-    let temporary = base.join("installation.json.tmp");
-    std::fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&temporary, base.join("installation.json")).map_err(|e| e.to_string())
-}
-
-fn installation_ready(
-    assets: &Path,
-    marker: &serde_json::Value,
-    expected: Option<&serde_json::Value>,
-    equivalence: Option<&serde_json::Value>,
-    expected_customiser: Option<&str>,
-) -> bool {
-    let install_root = assets.parent().unwrap();
-    expected.is_none_or(|versions| {
-        pipelines_acceptable(marker, versions, equivalence, install_root)
-    })
-        && assets.join("private/game.json").is_file()
-        && marker.get("outputs").is_none_or(|groups| {
-            groups.as_object().is_some_and(|groups| {
-                groups
-                    .values()
-                    .all(|files| receipt_present(install_root, files))
-            })
-        })
-        && customiser_current(assets, expected_customiser)
-}
-
 pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if std::env::args_os().any(|arg| arg == "--assets") { return Ok(PathBuf::from("assets")); }
-    if let Some(root) = std::env::var_os("SKATE3_ASSETS") {
-        let path = PathBuf::from(root);
-        if path.is_dir() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "SKATE3_ASSETS points to a missing directory: {}",
-            path.display()
-        ));
-    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("No executable directory")?;
     let base = root.join("data");
     let mut expected_customiser = None;
-    let mut equivalence = None;
     let expected = match std::fs::read(root.join("release.json")) {
         Ok(bytes) => {
             let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?.trim_start_matches('\u{feff}');
             let release: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
             expected_customiser = release["character_customiser"].as_str().map(str::to_owned);
-            equivalence = release.get("pipeline_equivalence").cloned();
             release.get("asset_pipelines").cloned()
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -163,31 +43,17 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
     };
     let existing = installed(&base)?;
     if let Some((assets, marker)) = &existing {
-        if installation_ready(
-            assets,
-            marker,
-            expected.as_ref(),
-            equivalence.as_ref(),
-            expected_customiser.as_deref(),
-        ) {
-            // Adopt this release's fingerprints when only an equivalence pair differed,
-            // so later launches do not keep re-evaluating historical hashes.
-            if let Some(versions) = &expected {
-                if marker.get("pipelines") != Some(versions) {
-                    stamp_pipelines(&base, marker, versions)?;
-                }
-            }
-            if let Some(fingerprint) = expected_customiser.as_deref() {
-                stamp_customiser(assets, fingerprint)?;
-            }
+        if installation_usable(assets, marker, expected.as_ref()) {
+            // An unprepared customiser never invalidates the installation: the
+            // runtime keeps the stock skater, and on hosts without the setup
+            // helper falling through here would make the copy unlaunchable.
+            report_customiser(assets, expected_customiser.as_deref());
             return Ok(assets.clone());
         }
     }
     let setup = root.join("support/skate3setup.exe");
     if !setup.is_file() {
-        return Err(
-            "This copy has not been set up. Use the complete Windows package, pass --assets DIRECTORY, or set SKATE3_ASSETS for development.".into(),
-        );
+        return Err("This copy has not been set up. Use the complete Windows package, or --assets DIRECTORY for development.".into());
     }
     let mut command = Command::new(setup);
     command.arg("--base").arg(&base).arg("--game-exe").arg(&exe);
@@ -202,73 +68,58 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if expected.as_ref().is_some_and(|versions| marker.get("pipelines") != Some(versions)) {
         return Err("Setup helper does not match this release's asset extractors. Unpack the complete package.".into());
     }
-    if !customiser_current(&assets, expected_customiser.as_deref()) {
-        return Err("Character customiser preparation did not complete for this release.".into());
-    }
+    report_customiser(&assets, expected_customiser.as_deref());
     Ok(assets)
 }
 
-fn customiser_files_ready(assets: &Path) -> bool {
-    std::fs::read(assets.join("private/customisation/current.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .is_some_and(|v| {
-            v["version"].as_u64() == Some(1)
-                && v["set"]
-                    .as_str()
-                    .is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        })
-        && ["library-v3.json", "extra-menu.json", "native-lighting.json", "native-roster/complete.json"]
-            .iter()
-            .all(|name| crate::customiser_parts::asset_directory(assets).join(name).is_file())
-        && ["catalog", "library", "menu", "lighting", "roster"].iter().all(|stage| {
-            let directory = crate::customiser_parts::asset_directory(assets);
-            std::fs::read(directory.join(format!("{stage}-complete.json")))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .is_some_and(|v| receipt_present(&directory, &v["files"]))
-        })
+fn report_customiser(assets: &Path, expected: Option<&str>) {
+    if customiser_current(assets, expected) {
+        return;
+    }
+    // The library is optional at runtime, so this only reports. Naming the
+    // searched directory is the whole diagnosis on a host with no setup helper.
+    eprintln!(
+        "Warning: character customiser was not prepared for this release ({}). \
+         Prepare it with tools/prepare_assets.py; your skater is unchanged.",
+        assets.join("private/customisation").display()
+    );
+}
+
+fn installation_usable(assets: &Path, marker: &serde_json::Value, expected: Option<&serde_json::Value>) -> bool {
+    expected.is_none_or(|versions| marker.get("pipelines") == Some(versions))
+        && assets.join("private/game.json").is_file()
+        && marker.get("outputs").is_none_or(|groups| groups.as_object().is_some_and(|groups|
+            groups.values().all(|files| receipt_present(assets.parent().unwrap(), files))))
 }
 
 fn customiser_current(assets: &Path, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| {
-        let degraded = std::fs::read(assets.join("private/customisation/customiser-availability.json"))
-            .ok()
+        let degraded = std::fs::read(assets.join("private/customisation/customiser-availability.json")).ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-        if let Some(v) = degraded.filter(|v| {
-            v["version"].as_u64() == Some(1) && v["fingerprint"].as_str() == Some(expected)
-        }) {
-            if v["status"] == "unavailable" {
-                return true;
-            }
-            if v["status"] == "retained" {
-                let directory = crate::customiser_parts::asset_directory(assets);
-                return ["catalog", "library", "menu", "lighting", "roster"].iter().all(|stage| {
-                    std::fs::read(directory.join(format!("{stage}-complete.json")))
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .is_some_and(|v| receipt_present(&directory, &v["files"]))
-                });
+        if let Some(v) = degraded.filter(|v| v["version"].as_u64()==Some(1)
+            && v["fingerprint"].as_str()==Some(expected)) {
+            if v["status"]=="unavailable" { return true; }
+            if v["status"]=="retained" {
+                let directory=crate::customiser_parts::asset_directory(assets);
+                return ["catalog","library","menu","lighting","roster"].iter().all(|stage|
+                    std::fs::read(directory.join(format!("{stage}-complete.json"))).ok()
+                        .and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .is_some_and(|v|receipt_present(&directory,&v["files"])));
             }
         }
-        customiser_files_ready(assets)
+        std::fs::read(assets.join("private/customisation/current.json")).ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|v| v["version"].as_u64() == Some(1) && v["fingerprint"].as_str() == Some(expected)
+                && v["set"].as_str().is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())))
+            && ["library-v3.json", "extra-menu.json", "native-lighting.json", "native-roster/complete.json"].iter()
+                .all(|name| crate::customiser_parts::asset_directory(assets).join(name).is_file())
+            && ["catalog", "library", "menu", "lighting", "roster"].iter().all(|stage| {
+                let directory = crate::customiser_parts::asset_directory(assets);
+                std::fs::read(directory.join(format!("{stage}-complete.json"))).ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .is_some_and(|v| receipt_present(&directory, &v["files"]))
+            })
     })
-}
-
-fn stamp_customiser(assets: &Path, expected: &str) -> Result<(), String> {
-    let path = assets.join("private/customisation/current.json");
-    let mut current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    if current["fingerprint"].as_str() == Some(expected) {
-        return Ok(());
-    }
-    current["fingerprint"] = serde_json::Value::String(expected.to_owned());
-    let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&temporary, path).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 // Cheap launch-time completeness check. Setup verifies SHA-256 before reuse;
@@ -319,91 +170,26 @@ mod tests {
         assert!(!receipt_present(&root, &serde_json::json!({"../missing": {"size": 0}})));
         assert!(!receipt_present(&root, &serde_json::json!({"nonexistent-skate-setup-test": {"size": 0}})));
     }
-
     #[test]
-    fn customiser_accepts_installed_data_when_release_fingerprint_changes() {
-        let root = std::env::temp_dir().join(format!(
-            "sk8-customiser-receipt-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let base = root.join("private/customisation/sets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(
-            root.join("private/customisation/current.json"),
-            br#"{"version":1,"set":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fingerprint":"old","source":"source"}"#,
-        )
-        .unwrap();
-        for name in [
-            "library-v3.json",
-            "extra-menu.json",
-            "native-lighting.json",
-            "native-roster/complete.json",
-        ] {
-            let path = base.join(name);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(path, b"ok").unwrap();
-        }
-        std::fs::write(base.join("payload"), b"ok").unwrap();
-        for stage in ["catalog", "library", "menu", "lighting", "roster"] {
-            std::fs::write(
-                base.join(format!("{stage}-complete.json")),
-                br#"{"files":{"payload":{"size":2}}}"#,
-            )
-            .unwrap();
-        }
-        assert!(customiser_current(&root, Some("new")));
-        stamp_customiser(&root, "new").unwrap();
-        let current = serde_json::from_slice::<serde_json::Value>(
-            &std::fs::read(root.join("private/customisation/current.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(current["fingerprint"].as_str(), Some("new"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn pipelines_accept_valid_group_outputs_when_fingerprint_changes() {
-        let expected = serde_json::json!({"core": "new", "maps": "maps-new"});
+    fn an_unprepared_customiser_does_not_invalidate_a_prepared_installation() {
+        let root = std::env::temp_dir().join(format!("sk8-unprepared-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let assets = root.join("installations").join("a".repeat(32)).join("assets");
+        std::fs::create_dir_all(assets.join("private")).unwrap();
+        std::fs::write(assets.join("private/game.json"), "{}").unwrap();
+        std::fs::create_dir_all(assets.parent().unwrap().join("maps")).unwrap();
+        let map = assets.parent().unwrap().join("maps/one.skate");
+        std::fs::write(&map, b"map").unwrap();
         let marker = serde_json::json!({
-            "pipelines": {"core": "old", "maps": "maps-old"},
-            "outputs": {
-                "maps": {"maps/university.skate": {"size": 4}}
-            }
+            "pipelines": {"core": "v"},
+            "outputs": {"maps": {"maps/one.skate": {"size": 3}}},
         });
-        let root = std::env::temp_dir().join(format!(
-            "sk8-pipeline-receipt-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let maps = root.join("maps/university.skate");
-        std::fs::create_dir_all(maps.parent().unwrap()).unwrap();
-        std::fs::write(&maps, b"test").unwrap();
-        assert!(pipelines_acceptable(&marker, &expected, None, &root));
-        assert!(!pipelines_current(&marker, &expected, None));
+        let expected = serde_json::json!({"core": "v"});
+        // No private/customisation exists, so the customiser is unprepared and
+        // report_customiser says so. The install must still be accepted: a
+        // missing customiser is survivable, an unusable install is not.
+        assert!(!customiser_current(&assets, Some("unprepared-fingerprint")));
+        assert!(installation_usable(&assets, &marker, Some(&expected)));
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn pipelines_accept_exact_and_listed_equivalence_only() {
-        let expected = serde_json::json!({"core": "new", "hud": "hud"});
-        let marker = serde_json::json!({"pipelines": {"core": "new", "hud": "hud"}});
-        assert!(pipelines_current(&marker, &expected, None));
-        let migrated = serde_json::json!({"pipelines": {"core": "old", "hud": "hud"}});
-        let table = serde_json::json!({"core": [["old", "new"]]});
-        assert!(pipelines_current(&migrated, &expected, Some(&table)));
-        assert!(!pipelines_current(&migrated, &expected, None));
-        let other = serde_json::json!({"core": [["other", "new"]]});
-        assert!(!pipelines_current(&migrated, &expected, Some(&other)));
-        let reverse = serde_json::json!({"core": [["new", "old"]]});
-        assert!(!pipelines_current(&migrated, &expected, Some(&reverse)));
     }
 }
