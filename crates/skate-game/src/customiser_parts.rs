@@ -601,6 +601,15 @@ pub(crate) fn update(
     let Ok(root) = root.single() else {
         return;
     };
+    // With the menu closed `preview` is just `draft.clone()`, so an unchanged
+    // draft means the applied outfit is already current. Returning here skips
+    // rebuilding the JSON preview, the selection strings and the per-colour
+    // `resolve` validation, none of which can have changed. `applied` starts as
+    // Null, so a never-applied profile still falls through and can report the
+    // unavailable-library status below.
+    if !state.open && parts.applied == state.draft {
+        return;
+    }
     let preview = state.preview(&parts);
     let Some(selections) = preview["selections"].as_object() else {
         return;

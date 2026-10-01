@@ -1,33 +1,8 @@
-//! Lua mod packages (API 2): low-level physics/graphics hooks, no Vehicle class.
-mod archive;
-pub mod audio;
-pub mod audio_content;
-pub mod audio_merge;
-pub mod audio_rules;
-pub mod audio_tuning;
-pub mod world_audio;
-pub mod menus;
-pub mod graphics_dynamic;
-pub mod presentation;
-pub mod scene;
-mod assets;
-mod lua_list;
-pub mod model;
-mod query;
+//! Window-free, versioned Lua package runtime. Host commands commit only after callbacks succeed.
 mod schema;
+mod archive;
 mod vm;
-pub mod extensions;
-
-pub use archive::{read_bounded, validate_package, validate_package_content, validate_package_content_at, Cache};
-pub use assets::convex_points_file;
-pub use model::model_shape_file;
-pub use query::{with_host, DynamicsHost, RaycastFilter, RaycastOptions};
-pub use schema::{Manifest, Setting, SettingValue};
-pub use vm::{
-    CaptureOptions, Command, TeleportOptions, TriggerBoxOptions, TriggerShapeOptions,
-    TriggerTrackOptions, VolumeOptions,
-};
-
+pub use schema::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -35,11 +10,24 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+pub use vm::Command;
 
-/// `SKATE3_MODS_ENABLE=<id>[,<id>…]` lists mods that start enabled without a saved preference
-/// (dev and test mods whose manifest has `"enabled_by_default": false`). A saved preference wins.
-fn enabled_by_env(id: &str) -> bool {
-    std::env::var("SKATE3_MODS_ENABLE").is_ok_and(|v| v.split(',').any(|x| x.trim() == id))
+/// Inspect a folder or ZIP and compile its Lua entry without executing callbacks.
+pub fn validate_package(source: &Path) -> Result<Manifest, String> {
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    let mut cache = archive::Cache::default();
+    let root = if source.is_dir() { source.clone() } else {
+        cache.materialize(source.parent().ok_or("Missing package parent")?, &source)?
+    };
+    let manifest: Manifest = serde_json::from_slice(&read_bounded(&root, "mod.json", 64 * 1024)?)
+        .map_err(|e| e.to_string())?;
+    manifest.validate()?;
+    fingerprint(&root)?;
+    let source = read_bounded(&root, &manifest.entry, 256 * 1024)?;
+    let source = std::str::from_utf8(&source).map_err(|e| e.to_string())?;
+    if source.starts_with('\u{1b}') { return Err("Lua bytecode is unsupported".into()); }
+    mlua::Lua::new().load(source).set_mode(mlua::chunk::ChunkMode::Text).into_function().map_err(|e|e.to_string())?;
+    Ok(manifest)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -59,35 +47,9 @@ pub struct Package {
     vm: Option<vm::Vm>,
     fingerprint: u64,
     pending: Option<(u64, Instant)>,
-    /// The files of the running mod's `audio.json` (and `audio.json` itself): an edit of only these
-    /// reloads the audio content while the script keeps running (doc 16 L7).
-    audio_files: std::collections::BTreeSet<String>,
-    /// The files of the last audio-only reload, until the game takes them.
-    audio_changes: Option<Vec<String>>,
-    /// Files changed since the fingerprint last changed (debounced with `pending`).
-    changes: Vec<String>,
 }
-
 impl Package {
-    pub fn content_fingerprint(&self) -> u64 {
-        self.fingerprint
-    }
-    /// The files an audio-only reload changed (doc 16 L7: the package's `audio.json` or files it
-    /// names changed while the mod runs; the script was not restarted). Taken once.
-    pub fn take_audio_changes(&mut self) -> Option<Vec<String>> {
-        self.audio_changes.take()
-    }
-    /// The `audio.json` file set of a package (empty without one or with an unreadable one).
-    fn read_audio_files(root: &Path) -> std::collections::BTreeSet<String> {
-        let mut set = std::collections::BTreeSet::new();
-        if let Ok(bytes) = read_bounded(root, audio_content::FILE, audio_content::MAX_JSON_BYTES) {
-            set.insert(audio_content::FILE.to_owned());
-            if let Ok(o) = serde_json::from_slice::<audio_content::AudioOverlay>(&bytes) {
-                set.extend(o.files().into_iter().map(|(f, _)| f.to_owned()));
-            }
-        }
-        set
-    }
+    pub fn content_fingerprint(&self) -> u64 { self.fingerprint }
     pub fn running(&self) -> bool {
         self.vm.is_some()
     }
@@ -101,21 +63,25 @@ pub struct Manager {
     pub commands: Vec<(String, Command)>,
     pub retired: Vec<String>,
     last_scan: Instant,
-    pub snapshot: std::sync::Arc<Value>,
-    /// Immutable sections shared across render frames until their native state changes.
-    pub snapshot_fields: SnapshotFields,
+    pub snapshot: Value,
     invalid_since: BTreeMap<String, Instant>,
     archives: archive::Cache,
-    fingerprints: archive::Fingerprints,
 }
-
-pub type SnapshotFields = std::sync::Arc<BTreeMap<String, std::sync::Arc<Value>>>;
-
 impl Manager {
     pub fn root(&self) -> &Path {
         &self.root
     }
-
+    /// True when a rescan is past its throttle and could start or retire a
+    /// package. Callers use this to decide whether the world snapshot has to be
+    /// rebuilt this tick.
+    pub fn scan_due(&self) -> bool {
+        self.last_scan.elapsed() >= Duration::from_millis(500)
+    }
+    /// True when at least one package has a live script able to read the
+    /// snapshot.
+    pub fn any_running(&self) -> bool {
+        self.packages.values().any(|p| p.running())
+    }
     pub fn new(root: PathBuf, preferences: PathBuf) -> Self {
         Self {
             packages: BTreeMap::new(),
@@ -125,68 +91,62 @@ impl Manager {
             commands: vec![],
             retired: vec![],
             last_scan: Instant::now() - Duration::from_secs(2),
-            snapshot: std::sync::Arc::new(Value::Null),
-            snapshot_fields: SnapshotFields::default(),
+            snapshot: Value::Null,
             invalid_since: BTreeMap::new(),
             archives: archive::Cache::default(),
-            fingerprints: archive::Fingerprints::default(),
         }
     }
-
     pub fn scan(&mut self, force: bool) {
-        if !force && self.last_scan.elapsed() < Duration::from_millis(500) {
+        if !force && !self.scan_due() {
             return;
         }
         self.last_scan = Instant::now();
-        if force {self.archives.invalidate();}
         self.diagnostics.clear();
-        let mut found = BTreeMap::<String, (PathBuf, Manifest, (u64, Vec<String>))>::new();
+        let mut found = BTreeMap::<String, (PathBuf, Manifest, u64)>::new();
         let mut duplicates = std::collections::BTreeSet::new();
         let dirs = match std::fs::read_dir(&self.root) {
             Ok(d) => d,
             Err(e) => {
                 self.diagnostics
                     .push(format!("Mods directory {}: {e}", self.root.display()));
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    let ids: Vec<_> = self.packages.keys().cloned().collect();
+                    for id in ids {
+                        self.stop(&id);
+                        self.packages.remove(&id);
+                    }
+                }
                 return;
             }
         };
         let mut paths: Vec<_> = dirs
             .filter_map(Result::ok)
             .map(|d| d.path())
-            .filter(|p| {
-                !p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-                    && (p.is_dir()
-                        || p.extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case("zip")))
-            })
+            .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                && (p.is_dir() || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))))
             .collect();
         paths.sort();
         if paths.len() > 128 {
             self.diagnostics.push(
-                "Only the first 128 packages are supported; remove excess packages".into(),
+                "Only the first 128 packages are supported; remove excess packages"
+                    .into(),
             );
         }
         for source in paths.into_iter().take(128) {
             let path = if source.is_file() {
                 match self.archives.materialize(&self.root, &source) {
                     Ok(path) => path,
-                    Err(e) => {
-                        self.diagnostics
-                            .push(format!("{}: {e}", source.display()));
-                        continue;
-                    }
+                    Err(e) => { self.diagnostics.push(format!("{}: {e}", source.display())); continue; }
                 }
-            } else {
-                source.clone()
-            };
+            } else { source.clone() };
+            // Invalid edits retire the old package: never silently retain outdated gameplay.
             let result = (|| {
                 let bytes = read_bounded(&path, "mod.json", 64 * 1024)?;
                 let manifest: Manifest =
                     serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 manifest.validate()?;
-                let (hash, changed) = self.fingerprints.get_with_changes(&path,force)?;
-                Ok::<_, String>((manifest, (hash, changed)))
+                let hash = fingerprint(&path)?;
+                Ok::<_, String>((manifest, hash))
             })();
             match result {
                 Ok((manifest, hash)) => {
@@ -226,14 +186,12 @@ impl Manager {
             self.stop(&id);
             self.packages.remove(&id);
         }
-        for (id, (root, manifest, (hash, changed))) in found {
+        for (id, (root, manifest, hash)) in found {
             if let Some(p) = self.packages.get_mut(&id) {
                 if p.fingerprint == hash {
                     p.pending = None;
-                    p.changes.clear();
                     continue;
                 }
-                p.changes.extend(changed);
                 let ready = match p.pending {
                     Some((h, since)) if h == hash => since.elapsed() >= Duration::from_millis(750),
                     _ => {
@@ -243,20 +201,6 @@ impl Manager {
                 };
                 if !force && !ready {
                     continue;
-                }
-                // Doc 16 L7: only the running mod's audio content changed (its `audio.json` or files
-                // the old or the new `audio.json` names): the game reloads the audio content (a hot
-                // swap) and the script keeps running.
-                let changes = std::mem::take(&mut p.changes);
-                if !force && p.running() && serde_json::to_value(&manifest).ok() == serde_json::to_value(&p.manifest).ok() && !changes.is_empty() {
-                    let new_files = Package::read_audio_files(&root);
-                    if changes.iter().all(|c| p.audio_files.contains(c) || new_files.contains(c)) {
-                        p.fingerprint = hash;
-                        p.pending = None;
-                        p.audio_files = new_files;
-                        p.audio_changes.get_or_insert_with(Vec::new).extend(changes);
-                        continue;
-                    }
                 }
                 let enabled = p.enabled;
                 self.stop(&id);
@@ -284,7 +228,7 @@ impl Manager {
                     self.start(&id);
                 }
             } else {
-                let saved = self.read_preferences(&id, manifest.enabled_by_default);
+                let saved = self.read_preferences(&id);
                 let settings = manifest
                     .settings
                     .iter()
@@ -312,9 +256,6 @@ impl Manager {
                         settings,
                         enabled,
                         vm: None,
-                        audio_files: Default::default(),
-                        audio_changes: None,
-                        changes: Vec::new(),
                     },
                 );
                 if enabled {
@@ -323,31 +264,20 @@ impl Manager {
             }
         }
     }
-
-    /// The saved preference of a mod; without one it starts enabled when its manifest says so
-    /// (`enabled_by_default`, default true) or when `SKATE3_MODS_ENABLE` lists its id.
-    fn read_preferences(&mut self, id: &str, enabled_by_default: bool) -> Preferences {
-        let fresh = enabled_by_default || enabled_by_env(id);
+    fn read_preferences(&mut self, id: &str) -> Preferences {
         match std::fs::read(self.preferences.join(format!("{id}.json"))) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
                 self.diagnostics
                     .push(format!("Settings {id}: {e}; defaults used"));
                 Preferences::default()
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preferences {
-                enabled: fresh,
-                values: BTreeMap::new(),
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preferences::default(),
             Err(e) => {
                 self.diagnostics.push(format!("Settings {id}: {e}"));
-                Preferences {
-                    enabled: fresh,
-                    values: BTreeMap::new(),
-                }
+                Preferences::default()
             }
         }
     }
-
     fn save(&self, id: &str) -> Result<(), String> {
         let p = self.packages.get(id).ok_or("Unknown mod")?;
         std::fs::create_dir_all(&self.preferences).map_err(|e| e.to_string())?;
@@ -364,7 +294,6 @@ impl Manager {
         .map_err(|e| e.to_string())?;
         std::fs::rename(temp, file).map_err(|e| e.to_string())
     }
-
     pub fn enable(&mut self, id: &str, enabled: bool) -> Result<(), String> {
         self.packages.get_mut(id).ok_or("Unknown mod")?.enabled = enabled;
         if enabled {
@@ -374,33 +303,20 @@ impl Manager {
         }
         self.save(id)
     }
-
     pub fn reload(&mut self, id: &str) {
         self.stop(id);
         if self.packages.get(id).is_some_and(|p| p.enabled) {
             self.start(id);
         }
     }
-
     fn start(&mut self, id: &str) {
         let Some(p) = self.packages.get_mut(id) else {
             return;
         };
         p.error = None;
-        // Top-level Lua initialization is a one-time operation and receives the
-        // same complete snapshot as callbacks, including shared native sections.
-        let mut initial = (*self.snapshot).clone();
-        if !self.snapshot_fields.is_empty() {
-            if !initial.is_object() { initial = serde_json::json!({}); }
-            for (key, value) in self.snapshot_fields.iter() {
-                initial[key] = (**value).clone();
-            }
-        }
-        match vm::Vm::new(&p.root, &p.manifest, &p.settings, &initial) {
+        match vm::Vm::new(&p.root, &p.manifest, &p.settings, &self.snapshot) {
             Ok(vm) => {
                 p.vm = Some(vm);
-                p.audio_files = Package::read_audio_files(&p.root);
-                p.audio_changes = None;
                 self.call_one(id, "on_load", Value::Null);
             }
             Err(e) => {
@@ -410,20 +326,17 @@ impl Manager {
             }
         }
     }
-
     fn stop(&mut self, id: &str) {
         if let Some(p) = self.packages.get_mut(id) {
             if let Some(mut vm) = p.vm.take() {
-                if let Err(e) = vm.call_shared("on_unload", Value::Null, &self.snapshot, None, &self.snapshot_fields) {
+                if let Err(e) = vm.call("on_unload", Value::Null, &self.snapshot) {
                     p.error = Some(format!("on_unload: {e}"));
                 }
             }
         }
-        // Keep on_unload commands for one apply pass; apply() skips non-running mods
-        // but retire_mod() clears attach/camera/bodies for this owner.
+        self.commands.retain(|(owner, _)| owner != id);
         self.retired.push(id.to_owned());
     }
-
     pub fn fail(&mut self, id: &str, error: String) {
         eprintln!("Lua [{id}]: {error}");
         self.stop(id);
@@ -431,13 +344,12 @@ impl Manager {
             p.error = Some(error);
         }
     }
-
     fn call_one(&mut self, id: &str, callback: &str, payload: Value) {
         let result = self
             .packages
             .get_mut(id)
             .and_then(|p| p.vm.as_mut())
-            .map(|vm| vm.call_shared(callback, payload, &self.snapshot, None, &self.snapshot_fields));
+            .map(|vm| vm.call(callback, payload, &self.snapshot));
         match result {
             Some(Ok(cmds)) => self
                 .commands
@@ -446,32 +358,12 @@ impl Manager {
             None => {}
         }
     }
-
-    pub fn call(&mut self, id: &str, callback: &str, payload: Value) {
-        self.call_one(id, callback, payload);
-    }
-
-    pub fn call_with_physics(&mut self,id:&str,callback:&str,payload:Value,physics:Value) {
-        let result=self.packages.get_mut(id).and_then(|p|p.vm.as_mut())
-            .map(|vm|vm.call_shared(callback,payload,&self.snapshot,Some(physics),&self.snapshot_fields));
-        match result {
-            Some(Ok(commands))=>self.commands.extend(commands.into_iter().map(|c|(id.to_owned(),c))),
-            Some(Err(error))=>self.fail(id,format!("{callback}: {error}")),None=>{}
-        }
-    }
-
     pub fn dispatch(&mut self, callback: &str, payload: Value) {
-        let ids: Vec<_> = self
-            .packages
-            .iter()
-            .filter(|(_, p)| p.running())
-            .map(|(id, _)| id.clone())
-            .collect();
+        let ids: Vec<_> = self.packages.keys().cloned().collect();
         for id in ids {
             self.call_one(&id, callback, payload.clone());
         }
     }
-
     pub fn setting(&mut self, id: &str, key: &str, value: Value) -> Result<(), String> {
         let p = self.packages.get_mut(id).ok_or("Unknown mod")?;
         if !p
@@ -494,11 +386,10 @@ impl Manager {
         self.call_one(
             id,
             "on_settings",
-            serde_json::json!({ "key": key, "value": value }),
+            serde_json::json!({"key":key,"value":value}),
         );
         self.save(id)
     }
-
     pub fn reset(&mut self, id: &str) -> Result<(), String> {
         let values: Vec<_> = self
             .packages
@@ -515,22 +406,89 @@ impl Manager {
         Ok(())
     }
 }
+fn fingerprint(root: &Path) -> Result<u64, String> {
+    use std::hash::{Hash, Hasher};
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        h: &mut std::collections::hash_map::DefaultHasher,
+        count: &mut usize,
+        bytes: &mut u64,
+    ) -> Result<(), String> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| e.to_string())?
+            .map(|p| p.map(|p| p.path()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        paths.sort();
+        for p in paths {
+            *count += 1;
+            if *count > 512 {
+                return Err("Package exceeds 512 files/directories".into());
+            }
+            if std::fs::symlink_metadata(&p)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink()
+            {
+                return Err("Symlinks are not supported".into());
+            }
+            let canonical = p.canonicalize().map_err(|e| e.to_string())?;
+            if !canonical.starts_with(root) {
+                return Err("Asset escapes mod root".into());
+            }
+            if p.is_dir() {
+                visit(root, &p, h, count, bytes)?;
+            } else {
+                let m = p.metadata().map_err(|e| e.to_string())?;
+                *bytes += m.len();
+                if *bytes > 64 * 1024 * 1024 {
+                    return Err("Package exceeds 64 MiB".into());
+                }
+                p.strip_prefix(root).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/").hash(h);
+                std::fs::read(&p).map_err(|e| e.to_string())?.hash(h);
+            }
+        }
+        Ok(())
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    visit(&root, &root, &mut h, &mut 0, &mut 0)?;
+    Ok(h.finish())
+}
+pub fn read_bounded(root: &Path, relative: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let path = Path::new(relative);
+    if path
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        || relative.contains(':')
+    {
+        return Err("Use a relative path without traversal".into());
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = root.join(path).canonicalize().map_err(|e| e.to_string())?;
+    if !path.starts_with(&root) {
+        return Err("Asset escapes mod root".into());
+    }
+    use std::io::Read;
+    let mut bytes = vec![];
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("Asset too large".into());
+    }
+    Ok(bytes)
+}
 
-#[cfg(test)]
-#[path="tests/engine_api.rs"]
-mod engine_api_tests;
-#[cfg(test)]
-#[path="tests/game_of_skate.rs"]
-mod game_of_skate_tests;
-
-#[cfg(test)]
-#[path="tests/challenges.rs"]
-mod challenge_tests;
-
-#[cfg(test)]
-#[path="tests/general_api.rs"]
-mod general_api_tests;
-
-#[cfg(test)]
-#[path="tests/skyline_drive.rs"]
-mod skyline_drive_tests;
+impl Drop for Manager {
+    fn drop(&mut self) {
+        for package in self.packages.values_mut() {
+            if let Some(mut vm) = package.vm.take() {
+                let _ = vm.call("on_unload", Value::Null, &self.snapshot);
+            }
+        }
+    }
+}
