@@ -28,6 +28,8 @@ const EFFECT_GAIN: f32 = 0.55;
 const ROLLING_MIN_SPEED: f32 = 0.6;
 const ROLLING_HARD_SPEED: f32 = 7.0;
 const ROLLING_SPEED_RANGE: f32 = 9.0;
+const ROLLING_MIN_GAIN: f32 = 0.30;
+const ROLLING_MAX_GAIN: f32 = 0.42;
 
 #[derive(Deserialize)]
 struct Rolling {
@@ -193,8 +195,12 @@ fn update_rolling(
     }
 
     let dt = time.delta_secs().min(0.1);
+    // A gentle rise with speed. The earlier 0.10..0.50 span was ~12 dB, which
+    // stacked on the rolling clips' own level and made a steady roll swell into
+    // something overpowering within a few seconds; 0.30..0.42 keeps the speed
+    // cue audible without the runaway.
     let target_volume = if rolling {
-        (0.10 + 0.40 * (speed / ROLLING_SPEED_RANGE)).clamp(0.0, 0.5)
+        (0.30 + 0.12 * (speed / ROLLING_SPEED_RANGE)).clamp(ROLLING_MIN_GAIN, ROLLING_MAX_GAIN)
     } else {
         0.0
     };

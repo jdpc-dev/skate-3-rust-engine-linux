@@ -42,6 +42,14 @@ duration windows in `audio.py` are the place to retune it. The native sound-even
 hashes that would map each gameplay event to an exact sound are not yet reversed,
 so the current mapping is by effect class, not by name.
 
+The rolling grains are not steady loops. Each one carries a built-in loudness ramp
+of roughly 0.5 dB/s, so a clip plays about 10 dB louder at its end than at its
+start. Looping one verbatim made a sustained roll swell into something
+overpowering over a few seconds. `_rolling_pcm` rides each clip toward its own
+median RMS to undo that ramp; the correction is clamped and smoothed so it never
+pumps brief transients, and it imposes no absolute level, so relative loudness
+between surfaces is unchanged.
+
 ## Runtime
 
 `crates/skate-game/src/audio.rs`:

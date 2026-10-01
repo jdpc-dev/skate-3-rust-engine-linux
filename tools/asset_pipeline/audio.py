@@ -4,9 +4,11 @@ Skate 3 stores gameplay audio as EA Audio Core (codec 3 / XMA2) streams inside E
 "EB" archives. This export turns a small, gameplay-relevant slice of them into plain
 WAV files the engine can stream through Bevy's audio plugin:
 
-* ``grains.big`` -- the fourteen surface rolling loops, named by material. These map
-  onto the native audio-surface ids (``EncodeRwSurfaceId`` low seven bits) that the
-  collision surfaces already carry, so rolling follows the actual surface.
+* ``grains.big`` -- the surface rolling grains, named by material. These map onto
+  the native audio-surface ids (``EncodeRwSurfaceId`` low seven bits) that the
+  collision surfaces already carry, so rolling follows the actual surface. The
+  grains carry a built-in loudness ramp, so ``_rolling_pcm`` flattens each one
+  before it is written.
 * ``wheels.big`` -- wheel-spin sounds.
 * ``audiofiles.big`` -- the ``Skate_Collisions`` and ``Skate_Metal`` SPLC banks, from
   which representative impact and grind one-shots are selected by duration.
@@ -98,6 +100,66 @@ def _member(archive: BigArchive, name: str) -> bytes:
     return archive.read(entry)
 
 
+# The retail rolling grains are short grains with a built-in loudness ramp rather
+# than steady loops: every exported clip rises about 0.5 dB/s from start to end.
+# Looping one verbatim therefore swells by 9-12 dB across each pass, which is what
+# made a sustained roll climb into something overpowering. The correction is a slow
+# gain ride toward each clip's own median level, so relative character is kept and
+# no absolute loudness is imposed.
+_ROLLING_RIDE_S = 0.25
+_ROLLING_MAX_CORRECTION_DB = 9.0
+_ROLLING_SMOOTHING = 0.25
+
+
+def _rms_envelope(samples, rate: int):
+    """Per-window RMS of a ``(frames, channels)`` array, one value per hop."""
+    import numpy as np  # noqa: PLC0415 - numpy ships with the setup toolchain
+
+    hop = max(int(rate * _ROLLING_RIDE_S), 1)
+    count = samples.shape[0] // hop
+    if count < 2:
+        return np.zeros(0), hop
+    windows = samples[:count * hop].reshape(count, hop, samples.shape[1])
+    power = np.maximum((windows.astype(np.float64) ** 2).mean(axis=(1, 2)), 1e-12)
+    return np.sqrt(power), hop
+
+
+def _rolling_pcm(pcm: bytes, channels: int, rate: int) -> bytes:
+    """Flatten a rolling grain's built-in loudness ramp so it loops evenly."""
+    import numpy as np  # noqa: PLC0415 - numpy ships with the setup toolchain
+
+    raw = np.frombuffer(pcm, dtype="<i2")
+    if raw.size < rate * channels:
+        return pcm
+    samples = raw.astype(np.float64).reshape(-1, channels)
+
+    rms, hop = _rms_envelope(samples, rate)
+    if rms.size < 2:
+        return pcm
+
+    # Ride toward the clip's own median level, so each surface keeps its
+    # character and relative loudness. The correction is clamped and smoothed so
+    # brief transients keep their weight instead of being pumped up to the mean.
+    target = float(np.median(rms))
+    correction_db = 20.0 * np.log10(target / rms)
+    np.clip(correction_db, -_ROLLING_MAX_CORRECTION_DB, _ROLLING_MAX_CORRECTION_DB,
+            out=correction_db)
+    smoothed = np.empty_like(correction_db)
+    running = correction_db[0]
+    for index, value in enumerate(correction_db):
+        running += _ROLLING_SMOOTHING * (value - running)
+        smoothed[index] = running
+
+    # Interpolate the ride between window centres and apply it.
+    centres = (np.arange(rms.size) + 0.5) * hop
+    positions = np.arange(samples.shape[0], dtype=np.float64)
+    gain = np.power(10.0, np.interp(positions, centres, smoothed) / 20.0)[:, None]
+
+    flattened = samples * gain
+    np.clip(flattened, -32768.0, 32767.0, out=flattened)
+    return flattened.astype("<i2").tobytes()
+
+
 def _rolling(eaac, game_root: Path, out: Path) -> dict:
     """Decode the grain archive and build the surface -> file map."""
     archive = BigArchive(game_root / "data/audio/grains.big")
@@ -107,6 +169,7 @@ def _rolling(eaac, game_root: Path, out: Path) -> dict:
         if not stem.endswith(("_soft", "_hard")):
             continue
         header, pcm = eaac.decode_member(archive.read(entry))
+        pcm = _rolling_pcm(pcm, header.channels, header.sample_rate)
         _write_wav(out / "rolling" / f"{stem}.wav", header.channels, header.sample_rate, pcm)
         decoded[stem] = {"channels": header.channels, "rate": header.sample_rate}
     if not decoded:
