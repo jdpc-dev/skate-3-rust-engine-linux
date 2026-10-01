@@ -48,15 +48,19 @@ Linux; assets are prepared explicitly with the tools in `tools/`.
 
 The script builds `skate3rust` and the native RefPack decoder, then stages the
 executable, `mods/`, `maps/` and `refpack.so` into `run/`. It deliberately skips
-the Windows DLL dependency walk and Steam relay staging. A release build is
-opt-in and otherwise the dev profile is used (already `opt-level = 3`):
+the Windows DLL dependency walk and Steam relay staging. The release profile is
+the default. The dev profile compiles at the same `opt-level = 3` but keeps
+debug-assertions and overflow-checks enabled, which measured about 15% of frame
+time on an AMD Vega 8 laptop without changing the simulation; use it when you
+need a debugger:
 
 ```bash
-RELEASE=1 ./scripts/build-linux.sh
+PROFILE=debug ./scripts/build-linux.sh
 ```
 
-Overridable environment variables: `TARGET_DIRECTORY` (default `./target`),
-`RUN_DIRECTORY` (default `./run`) and `LIBSUFFIX` (default `so`).
+Overridable environment variables: `PROFILE` (default `release`), 
+`TARGET_DIRECTORY` (default `./target`), `RUN_DIRECTORY` (default `./run`) and
+`LIBSUFFIX` (default `so`).
 
 If the native RefPack converter fails to build the script warns and continues;
 conversion then falls back to a slower pure-Python decoder.
