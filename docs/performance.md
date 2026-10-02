@@ -288,3 +288,43 @@ Release is now the default build profile. Both profiles compile at `opt-level =
 3` and the test suite is identical (272 passed, 4 pre-existing failures), so the
 simulation arithmetic is unchanged; the 15% is purely the absence of
 debug-assertions and overflow-checks.
+
+## Solve-phase allocations: measured, not worth it
+
+`physics::solve::advance` copies the board contact rows out of
+`BoardWorld::query_primitives` before running the skeleton query, because
+`query_primitives` clears the world's own row storage on every call
+(`board_world.rs:279`). The copy is load-bearing; removing it would drop the
+board contacts.
+
+The *destination* was not: replacing the per-tick `.to_vec()` with a
+`GamePhysics`-owned buffer handed back at the end of the tick was implemented
+and verified bit-exact by the determinism harness (960-line traces byte
+identical on `Flat` and `Course`). It is documented here as a negative result
+because it was reverted.
+
+Allocation counts, from a temporary counting global allocator, normalised to
+the ~900 physics ticks each run performs:
+
+| Variant | Allocations per physics tick |
+| --- | --- |
+| baseline | 165,415 / 165,880 |
+| reused buffer | 165,206 / 165,860 |
+
+The change removes exactly one allocation per tick out of roughly 165,000 —
+about 0.0006%, below the ~335/tick run-to-run spread. Paired frame-time A/B on
+University confirmed it: per-pair physics-tick deltas were +1.18, +0.64, -0.05,
+-0.03, +0.06 and +0.37 ms, i.e. sign changes with no directional signal.
+
+It was reverted because it added a field to `GamePhysics` plus a hand-back that
+two early-exit paths (`skeleton_colliders::enabled_volumes` and the
+post-solve diagnostics check) skip, in exchange for an effect that cannot be
+measured above noise. Note the surrounding context: the process performs on the
+order of 165,000 allocations per physics tick in total, so the solve-phase copy
+is not where allocation pressure lives.
+
+The determinism harness in `crates/skate-game/src/tests/determinism.rs` is the
+tool that made this checkable without relying on frame times. It runs 240 ticks
+on `Flat` and `Course` and digests body rates, skeleton rates and poses,
+`solved_contacts()` and `contact_reports()`, and it is what any future physics
+change must pass before it is considered.

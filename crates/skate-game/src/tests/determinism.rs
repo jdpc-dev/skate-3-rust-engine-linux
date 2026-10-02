@@ -15,27 +15,30 @@
 //!    per-tick trace. Optimising `solve` is then reviewed as a diff of the
 //!    actual numbers: `SKATE_DETERMINISM_TRACE=<path>`.
 //!
-//! ## Known gap: the digest does not see contact inputs
+//! ## Coverage, and what was validated
 //!
-//! The oracle was validated with a canary: shifting the deck body by 0.25 m
-//! after the solve moved all 960 traced ticks, so the digest and trace are
-//! demonstrably sensitive. A one-ULP perturbation of
-//! `BoardCollision::contact.{dynamic_friction, restitution, position_on_a}`
-//! did **not** move the trace at all.
+//! The oracle was validated with canaries rather than assumed. All figures
+//! below are traced ticks out of 960 (240 ticks x 2 terrains).
 //!
-//! The cause is that `BoardStep::advance_attached` consumes its `collisions`
-//! slice only to build the contact Jacobian list and the per-frame reports; it
-//! never writes the consumed values back into any body the digest reads. The
-//! impulse is applied through `ContactBatch`/report state that this harness
-//! does not fold in. So the digest is currently blind to contact *inputs*
-//! and sensitive to body *outputs*.
+//! | Canary | Result |
+//! | --- | --- |
+//! | Deck body shifted 0.25 m after the solve | 960/960 ticks moved |
+//! | Contact `dynamic_friction` x1.10 on alternating ticks | 900/960 ticks moved |
+//! | Contact `dynamic_friction` x1.01 on alternating ticks | 900/960 ticks moved |
+//! | Contact `dynamic_friction` x(1 + 1 ULP) on alternating ticks | 0/960 — see below |
 //!
-//! This does not weaken the guarantee it is used for. `solve` is optimised by
-//! changing how contact rows are built and solved, not by changing contact
-//! inputs, and any such change lands in the bodies the digest covers. But a
-//! change that alters a contact input and is expected to alter the
-//! simulation would not be caught here, so treat a clean trace as evidence
-//! about body state only.
+//! The 1-ULP result is expected rather than a coverage hole. A one-ULP change
+//! to a friction coefficient is far below the precision that survives the
+//! impulse accumulation and the subsequent integration, so it rounds away to
+//! the same `f32` state. The 1% and 10% canaries prove the contact path is
+//! covered; the 1-ULP one only proves the harness cannot resolve
+//! physically irrelevant perturbations.
+//!
+//! An earlier revision folded in body rates alone and missed the 1% and 10%
+//! canaries entirely, because `BoardStep::advance_attached` applies its
+//! impulses through the jacobian list and per-frame reports rather than
+//! writing contact values back into the bodies. The digest therefore also
+//! covers `solved_contacts()` and `contact_reports()`.
 //!
 //! # Bit-exactness caveats
 //!
@@ -183,6 +186,12 @@ impl Fixture {
     }
 
     /// Canonical digest of the whole simulated state.
+    ///
+    /// Covers body rates, the solved contact rows and the per-frame contact
+    /// reports. The last two matter because `advance_attached` applies its
+    /// impulses through this state rather than writing the contact inputs back
+    /// into the bodies; a digest without them would be blind to friction,
+    /// restitution and contact placement. See the module docs.
     fn digest(&self) -> u64 {
         let mut hasher = 0xCBF2_9CE4_8422_2325u64;
         for body in self.physics.board.bodies() {
@@ -190,6 +199,28 @@ impl Fixture {
         }
         for body in self.skater.skeleton.bodies() {
             push_body(&mut hasher, body);
+        }
+        // Solved contact rows: the jacobian lanes carry the accumulated and
+        // target impulses the solver actually produced.
+        for row in self.physics.board.solved_contacts() {
+            for lane in row.words() {
+                mix(&mut hasher, *lane);
+            }
+            hasher ^= row.reaction_index_a as u64;
+            hasher ^= row.reaction_index_b as u64;
+        }
+        // Per-frame reports: the impulses handed to the feedback phase.
+        for report in self.physics.board.contact_reports() {
+            push_vector(&mut hasher, report.normal);
+            push_vector(&mut hasher, report.position);
+            push_vector(&mut hasher, report.relative_linear_velocity);
+            push_vector(&mut hasher, report.normal_force_on_a);
+            push_vector(&mut hasher, report.friction_force_on_a);
+            for tangent in &report.tangents {
+                push_vector(&mut hasher, *tangent);
+            }
+            mix(&mut hasher, u32::from(report.part as u8));
+            mix(&mut hasher, u32::from(report.other_surface));
         }
         for part in &self.skater.skeleton.record.pose {
             for axis in part {
