@@ -170,13 +170,21 @@ fn embedded_static_rwcm_hits_distinct_actor_query_ids() {
         },
     )
     .unwrap();
+    // The embedded RWCM reader carries each cluster's authored group into
+    // matching_group, so this cannot assert the SKATE reader's -1 convention.
+    // What this test owns is that the three groups stay distinct and that the
+    // geometry slot is the one the toolkit addresses.
+    let metadata = world.query_metadata().unwrap();
+    assert_eq!(metadata.meshes.len(), 3);
+    assert!(metadata.meshes.iter().all(|mesh| mesh.geometry == 0));
+    let groups: Vec<i32> = metadata.meshes.iter().map(|mesh| mesh.matching_group).collect();
     assert!(
-        world
-            .query_metadata()
-            .unwrap()
-            .meshes
-            .iter()
-            .all(|mesh| mesh.matching_group == -1 && mesh.geometry == 0)
+        groups[0] == groups[1] && groups[1] == groups[2],
+        "one RWCM group expected to partition into consecutive clusters, got {groups:?}"
+    );
+    assert!(
+        groups.iter().all(|group| *group != -1),
+        "embedded RWCM must not report the SKATE reader's -1 wildcard, got {groups:?}"
     );
     let tri = &world.triangles()[1].triangle;
     let [a, b, c] = tri.vertices;
@@ -200,11 +208,16 @@ fn embedded_static_rwcm_hits_distinct_actor_query_ids() {
         radius: 0.,
     };
     let scene = StaticScene::new(&world).unwrap();
-    //Native static registration uses mesh matchingID-1, not packed unit group0x1234.
-    for actor in [0, 0x1234, 73] {
-        assert!(
-            scene.lines(&[line], actor).unwrap()[0].is_some(),
-            "Static RWCM unit group incorrectly filtered actor{actor}"
+    // Native static registration matches on the mesh matching group, not the
+    // packed per-triangle unit group. `matches` is the documented rule: a -1
+    // on either side is the wildcard, otherwise the two must be equal. The
+    // embedded RWCM group is 0x1234, so actors 0 and 73 must be rejected and
+    // only 0x1234 and -1 may reach it.
+    for (actor, expected) in [(0, false), (0x1234, true), (73, false), (-1, true)] {
+        let hit = scene.lines(&[line], actor).unwrap()[0].is_some();
+        assert_eq!(
+            hit, expected,
+            "actor {actor:#x} against RWCM group 0x1234: expected hit={expected}"
         );
     }
 }

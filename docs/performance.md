@@ -132,11 +132,9 @@ counts increase; it does not change logical counts or dispatch extra instances.
 Mesh morph-target lookup is refreshed on GPU asset changes, and identical PBR
 materials can share handles while each mesh retains its own baked lightmap.
 
-No triangles, collision detail, lighting, or draw distance were removed. LODs
-remain a possible next step for distant geometry, particularly hierarchical LODs
-that also reduce the number of draws. They do not address the buffer-cache miss
-fixed here. GPU occlusion culling is also relevant to a dense city, but the current
-engine's version is experimental: [Bevy's migration notes](https://bevy.org/learn/migration-guides/0-18-to-0-19/#occlusion-culling-is-no-longer-experimental)
+No triangles, collision detail, lighting, or draw distance were removed. GPU
+occlusion culling is also relevant to a dense city, but the current engine's
+version is experimental: [Bevy's migration notes](https://bevy.org/learn/migration-guides/0-18-to-0-19/#occlusion-culling-is-no-longer-experimental)
 describe correctness fixes in 0.19. It was not enabled as an unverified workaround.
 
 Validation: the explicit GPU regression test and game suite (46 passed,
@@ -172,12 +170,52 @@ the GPU skips hidden geometry. These sweeps are not a minimum-FPS guarantee.
 Spatial splitting increased batches from 30,097 to 55,850 and was removed from
 the final implementation. All 8,214,063 render triangles remain available.
 
+The setting remains available in the Escape menu, but `Off` is the recommended
+value on this hardware: the A/B above shows no gain to pay for the extra depth
+prepass. The saved `graphics.json` for the Vega 8 machine has it `Off`.
+
 Validation: city sweep and normal startup capture completed without GPU errors
 at 8x MSAA. The game suite has 47 passing tests and 21 pre-existing ignored tests,
 including changing culling, MSAA and internal resolution together. The explicit
 GPU lightmap cache regression test also passed. The startup
 image was visually inspected. Manual menu testing was interrupted by the user
 stopping Computer Use, so live UI toggling has not been visually verified.
+
+## Draw-call cost: exhausted
+
+The three structural levers for per-draw CPU cost have all been tried. Do not
+re-attempt them without new evidence.
+
+| Lever | Result |
+| --- | --- |
+| Material batch merging by identity | 8,546 source groups reduced to 4,868; already canonical, and `WorldMaterialKey` deliberately does not split `tangent_mode` groups so shading is unchanged |
+| GPU occlusion culling (backported `#22603`) | 124.1 → 128.0 FPS at 1440p / 8x MSAA, inside run-to-run variation |
+| Spatial splitting into 128-unit cells | 30,097 → 55,850 batches, slower; reverted |
+
+**Why occlusion culling did not pay off.** The bottleneck is CPU per-mesh
+overhead in the render thread, not draw count or triangle count. The two
+settings that actually moved the frame differ in exactly one respect:
+
+- `Draw distance` sets `Visibility::Hidden`, which removes the mesh from
+  extraction entirely, so the CPU never queues it. It cuts CPU *and* GPU work.
+  Measured 54.1 → 73.9 → 81.7 FPS for Full / 150 m / 75 m.
+- `Occlusion culling` rejects the mesh on the GPU. The CPU still extracts,
+  queues and writes the indirect instance for every mesh, so only GPU work
+  drops.
+
+This is why a lower batch count does not automatically mean a faster frame:
+splitting raised the mesh count, and the per-mesh CPU cost is what dominates.
+
+`graphics_menu::cull_distant_batches` itself was measured rather than assumed:
+55 us per frame over 572 calls at 4,868 batches, i.e. 0.3% of a 17 ms frame and
+well under thermal run-to-run noise. Gating it on camera movement was
+considered and rejected — it would add a stateful early-out to save less than
+the measurement error, and it would not help at all while actually skating.
+
+Hierarchical LOD for distant geometry is the only remaining lever that reduces
+the mesh count itself. It is deliberately not implemented: it is the one
+change that would alter distant-geometry appearance, and it is not worth
+trading fidelity for a low single-digit frame share on this hardware.
 
 ## Low-end graphics options
 
