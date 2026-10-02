@@ -9,7 +9,7 @@ mod air_trajectory;
 mod animated_skeleton;
 pub(crate) mod camera_output;
 mod clock;
-pub(crate) mod colliders;
+mod colliders;
 mod controls;
 mod foot_ik;
 mod footplant;
@@ -25,34 +25,29 @@ mod riding_outputs;
 mod skateboard_controller;
 mod skater;
 mod skeleton_air;
-pub(crate) mod skeleton_body;
-pub(crate) mod skeleton_colliders;
+mod skeleton_body;
+mod skeleton_colliders;
 mod skeleton_controller;
 mod skeleton_feedback;
 mod skeleton_input_runtime;
 mod skeleton_output;
 mod solve;
-pub(crate) mod solid_contacts;
 pub(crate) mod network;
 pub(crate) use skater::SkaterRuntime;
-pub(crate) use input_phase::facing_from_visual;
 mod animation_feedback;
 mod animation_feedback_settings;
 mod animation_input;
 mod animation_phase;
 mod biped_ground;
 mod frame;
-pub(crate) mod startup_check;
-#[cfg(debug_assertions)]
-mod dev_trace;
 mod grind;
 mod grind_air_settings;
 mod grind_camera;
 mod grind_chromosome;
 mod grind_host;
 mod grind_materials;
+mod grind_names;
 mod ground_animation;
-mod grind_trick;
 mod slide_state;
 mod revert_state;
 mod ground_exit;
@@ -93,7 +88,7 @@ use skate_core::{
         drive_frames::RetailAffineTransform,
     },
 };
-
+use skate_data::collections::Collections;
 
 #[derive(Resource)]
 pub(crate) struct GamePhysics {
@@ -107,7 +102,7 @@ pub(crate) struct GamePhysics {
     grind_world: std::sync::Arc<crate::grind_world::StaticProvider>,
     grind_materials: grind_materials::GrindMaterials,
     offboard_grab_scene: offboard::grab_scene::Registry,
-    pub(crate) settings: PhysicsSettings,
+    settings: PhysicsSettings,
     animation_profile: animation_phase::AnimationProfile,
     query: WorldContactSettings,
     retention: ContactRetentionSettings,
@@ -120,6 +115,7 @@ pub(crate) struct GamePhysics {
     pub processed_flags_2468: u32,
     /// Toolkit ctor82C0680C clears8384bit7; wipeout entry/exit owns changes.
     pub board_wiping_out: bool,
+    pub trainer: skate_mods::TrainerTuning,
 }
 
 /// Cross-phase records for the current fixed tick. Subsystems retain their
@@ -213,7 +209,7 @@ mod exchange_tests {
 
 impl GamePhysics {
     pub(crate) fn set_gesture_preferences(&mut self, gestures: Option<[u32; 4]>) {
-        self.animation_profile.gesture_selections = Some(gestures.filter(|g| g.iter().all(|v| *v < 37)).unwrap_or([0, 1, 2, 3]));
+        self.animation_profile.gesture_selections = gestures.filter(|g| g.iter().all(|v| *v < 37));
     }
     pub(crate) fn set_equipment_preferences(&mut self, truck: f32, wheel: f32) {
         if truck.is_finite() && wheel.is_finite() {
@@ -226,15 +222,17 @@ impl GamePhysics {
         // Keep the board, active trick, equipment preferences and controller history.
         self.animation_profile.physics_mode = difficulty as u32;
     }
+    pub(crate) fn simulation_elapsed_us(&self) -> u64 {
+        (self.ticks as f64 * f64::from(self.settings.step.simulation.time_step) * 1_000_000.0)
+            as u64
+    }
+
     pub(crate) fn period(&self) -> std::time::Duration { self.clock.period() }
 
     pub(crate) fn difficulty_index(&self) -> u32 { self.animation_profile.physics_mode }
 
     pub(crate) fn world_triangles(&self) -> &[skate_core::physics::board_world::WorldTriangle] { self.world.triangles() }
 
-    pub(crate) fn set_external_queries(&mut self, queries: Option<std::sync::Arc<dyn skate_core::physics::board_world::ExternalQueries>>) {
-        self.world.set_external_queries(queries);
-    }
     pub(crate) fn world(&self) -> &BoardWorld {
         &self.world
     }
@@ -245,7 +243,6 @@ impl GamePhysics {
         Self::load_with_terrain(asset_root, ground::Terrain::Flat)
     }
 
-    #[cfg(test)]
     pub(crate) fn load_with_terrain(
         asset_root: &std::path::Path,
         terrain: ground::Terrain,
@@ -253,23 +250,32 @@ impl GamePhysics {
         Self::load_with_world(asset_root, terrain, None)
     }
 
-    #[cfg(test)]
     pub(crate) fn load_with_world(
         asset_root: &std::path::Path,
         terrain: ground::Terrain,
         map: Option<&skate_data::skate_map::SkateMap>,
     ) -> Result<Self, String> {
-        Self::load_world_difficulty(asset_root, terrain, map, crate::difficulty::Difficulty::Easy)
+        let data = Collections::load(asset_root)?;
+        Self::load_world_difficulty(asset_root, terrain, map, crate::difficulty::Difficulty::Easy, &data)
+    }
+
+    pub fn load_with_map(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>) -> Result<Self, String> {
+        Self::load_with_difficulty(asset_root, map, crate::difficulty::Difficulty::Easy)
     }
 
     pub fn load_with_difficulty(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty) -> Result<Self, String> {
-        Self::load_world_difficulty(asset_root, ground::Terrain::Course, map, difficulty)
+        let data = Collections::load(asset_root)?;
+        Self::load_with_difficulty_data(asset_root, map, difficulty, &data)
     }
 
-    fn load_world_difficulty(asset_root: &std::path::Path, terrain: ground::Terrain, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty) -> Result<Self, String> {
-        let data = crate::custom_difficulty::load_collections(asset_root)?;
-        let settings = PhysicsSettings::load(&data)?;
-        let animation_profile = animation_phase::AnimationProfile::load(&data, difficulty.profile_key())?;
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    pub(crate) fn load_with_difficulty_data(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty, data: &Collections) -> Result<Self, String> {
+        Self::load_world_difficulty(asset_root, ground::Terrain::Course, map, difficulty, data)
+    }
+
+    fn load_world_difficulty(_asset_root: &std::path::Path, terrain: ground::Terrain, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty, data: &Collections) -> Result<Self, String> {
+        let settings = PhysicsSettings::load(data)?;
+        let animation_profile = animation_phase::AnimationProfile::load(data, difficulty.key())?;
         eprintln!(
             "SKATE_PHYSICS_MODE {} index={}",
             difficulty.key(), animation_profile.physics_mode
@@ -321,7 +327,7 @@ impl GamePhysics {
         let offboard_grab_scene =
             offboard::grab_scene::Registry::new(&world, Vec::new(), Vec::new())?;
         let processed_flags_2468 = 0x2000;
-        let riding = RidingOutputs::load(&data, &board, processed_flags_2468)?;
+        let riding = RidingOutputs::load(data, &board, processed_flags_2468)?;
         let (query, retention) = ground::query_settings();
         Ok(Self {
             network_proxies: network::Proxies::default(),
@@ -344,6 +350,7 @@ impl GamePhysics {
             exchange: SimulationExchange::new(0),
             processed_flags_2468,
             board_wiping_out: false,
+            trainer: Default::default(),
         })
     }
 
@@ -407,14 +414,8 @@ impl Plugin for PhysicsPlugin {
     }
 }
 
-/// Collision+16 low 16 bits: the board's surface vote (82C08818, 12 when a board
-/// contact is water), as respawn reads it. Read-only, for game_audio (the audio
-/// record's `+813`, the board in water).
-pub(crate) fn board_surface(physics: &GamePhysics) -> u32 {
-    ground_runtime::active_surface(&physics.riding, &physics.board) & 0xffff
-}
-
-pub(crate) fn advance(
+fn advance(
+    vehicles: Res<crate::modding::vehicles::Vehicles>,
     mut physics: ResMut<GamePhysics>,
     mut skater: ResMut<SkaterRuntime>,
     mut controls: ResMut<PlayerControls>,
@@ -424,22 +425,13 @@ pub(crate) fn advance(
     mut cadence: ResMut<Time<Fixed>>,
     mut exit: MessageWriter<AppExit>,
     mut performance: Option<ResMut<crate::performance::Performance>>,
-    mods: Option<Res<crate::modding::Mods>>,
 ) {
-    if physics.failed {
-        return;
-    }
-    if mods
-        .as_ref()
-        .is_some_and(|m| crate::modding::player_attached(m) || crate::modding::player_suspended(m))
-    {
+    if physics.failed || vehicles.occupied() {
         return;
     }
     let timer = performance.as_ref().map(|_| std::time::Instant::now());
     let mut actions = input.0.actions();
     let input_available = input.0.controller_available();
-    #[cfg(debug_assertions)]
-    let _physics_trace = dev_trace::begin(&physics, &skater, *input.0.actions().values());
     if let Err(message) = frame::advance(
         &mut physics,
         &mut skater,
@@ -449,8 +441,6 @@ pub(crate) fn advance(
         input_available,
         &mut camera,
     ) {
-        #[cfg(debug_assertions)]
-        dev_trace::dump(&format!("tick={} physics_error={message}", physics.ticks));
         physics.failed = true;
         error!(
             "{message}; state={:?}; tick={}; mapped_input={:?}; force_mode={}; board_axis_y={}; flags={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
@@ -514,9 +504,6 @@ impl GamePhysics {
             grind::post(self, skater)?;
         }
         wipeout::check_after_physics(self, skater)?;
-        if skater.player_state.current() == skate_core::player::state::PhysicalStateId::PhysicsAirSecondary {
-            grind_trick::post_velocity(self, skater);
-        }
         offboard::post_physics::advance(self, skater)?;
         let compression = skater.skeleton_output.average_compressions(&self.board);
         render_pose::publish(self, skater, compression)?;
@@ -568,22 +555,6 @@ mod air_tests;
 #[cfg(test)]
 #[path = "tests/wipeout_playback.rs"]
 mod wipeout_tests;
-
-#[cfg(test)]
-#[path = "tests/water_drop.rs"]
-mod water_drop_tests;
-
-#[cfg(test)]
-#[path = "tests/grind_bail.rs"]
-mod grind_bail_tests;
-
-#[cfg(test)]
-#[path = "tests/audio_state_capture.rs"]
-mod audio_state_capture_tests;
-
-#[cfg(test)]
-#[path = "tests/trigger_points.rs"]
-mod trigger_points_tests;
 
 fn present(
     physics: Res<GamePhysics>,
@@ -638,10 +609,15 @@ mod offboard_jump_playback_tests;
 #[path = "tests/offboard_root_trace.rs"]
 mod offboard_root_trace;
 
-#[cfg(test)]
-#[path = "tests/gameplay_gestures.rs"]
-mod gameplay_gesture_tests;
-
-#[cfg(test)]
-#[path = "tests/difficulty.rs"]
-mod difficulty_tests;
+impl SkaterRuntime {
+    /// Observe the current grind publication without adding a second grind owner.
+    pub(crate) fn mod_grind(&self) -> (bool, &str, u32, f32) {
+        let out = &self.player_input.physical.grinds;
+        let active = self.grind.active_family().is_some();
+        let name = if active {
+            grind_chromosome::names::lookup(out.animation_chromosome_268)
+                .map(|name| name.attribute).unwrap_or("")
+        } else { "" };
+        (active, name, out.words_136_140[0], self.grind.last_grind_distance())
+    }
+}

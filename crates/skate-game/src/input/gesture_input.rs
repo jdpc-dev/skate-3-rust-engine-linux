@@ -15,6 +15,11 @@ pub(crate) struct GestureInput {
 impl GestureInput {
     pub fn load(root: &Path) -> Result<Self, String> {
         let data = Collections::load(root)?;
+        Self::load_with_data(root, &data)
+    }
+
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    pub(crate) fn load_with_data(root: &Path, data: &Collections) -> Result<Self, String> {
         let misses = |key| -> Result<u8, String> {
             let field = data.field("recognizer", key, "NumTicksPatternNotInRangeBeforeCulling")?;
             if field.type_name != "EA::Reflection::UInt8" {

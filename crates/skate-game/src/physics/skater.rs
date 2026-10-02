@@ -44,7 +44,6 @@ pub(crate) struct SkaterRuntime {
     pub biped_air: super::biped_air::BipedAir,
     pub landing_on_deck: super::landing_on_deck::Runtime,
     pub landing_deck: super::offboard::landing_deck::Owner,
-    pub grind_trick: super::grind_trick::GrindTrick,
     pub ground_animation: super::ground_animation::GroundAnimationRuntime,
     pub ground_animation_settings: super::ground_animation::GroundAnimationSettings,
     pub revert_state: super::revert_state::RevertState,
@@ -57,13 +56,10 @@ pub(crate) struct SkaterRuntime {
     pub handplant: super::handplant::Handplant,
     pub wipeout: super::wipeout::Wipeout,
     pub wipeout_state: super::wipeout_states::WipeoutState,
-    pub(super) respawn: super::respawn::Runtime,
+    pub respawn: super::respawn::Runtime,
     pub teleport_state: super::teleport_state::Runtime,
     pub skeleton: SkeletonBody,
     pub skeleton_joints: SkeletonJoints,
-    pub(crate) mod_part_overrides: std::collections::BTreeMap<usize,(String,skate_mods::extensions::PartOverride)>,
-    pub(crate) mod_contact_frame: crate::modding::player_physics::ContactFrame,
-    pub(crate) mod_joint_overrides: std::collections::BTreeMap<usize,(String,skate_mods::extensions::JointOverride)>,
     pub skeleton_drives: SkeletonDrives,
     pub skeleton_collision: SkeletonCollisionMode,
     pub collision_feedback: skate_core::physics::skeleton_body::SkeletonCollisionFeedback,
@@ -102,43 +98,8 @@ pub(crate) struct SkaterRuntime {
 }
 
 impl SkaterRuntime {
-    /// Prepare all settings before committing; never replace active physics state.
-    pub(crate) fn reload_difficulty(&mut self, data: &Collections) -> Result<(), String> {
-        let profiles = super::ground_runtime::GroundProfiles::load(data)?;
-        let ground_settings = profiles.select(self.player_input.processed.state_variant_index_2528,
-            self.player_input.processed.surface_mode_2540.clamp(1, 5))?;
-        let ground = GroundState::load(data, "test", true)?;
-        let air = super::air_phase::AirSettings::load(data)?;
-        let reckoning = super::air_reckoning::AirReckoning::load(data)?;
-        let known = super::known_air::KnownAir::load(data)?;
-        let wipeout = super::wipeout::Wipeout::load(data)?;
-        let grind = super::grind::Runtime::load(data)?;
-        let jumps = super::ground_animation::GroundAnimationSettings::load(data)?;
-        let animation = AnimationInput::load(data, &self.animation.evaluator.frames, "test")?;
-        let player = PlayerInputRuntime::load(data)?;
-        self.ground_profiles = profiles; self.ground_settings = ground_settings;
-        self.ground.adopt_mode_settings(ground);
-        self.air_settings = air;
-        self.air_reckoning.adopt_mode_settings(reckoning);
-        self.known_air.adopt_mode_settings(known);
-        self.wipeout.adopt_mode_settings(wipeout);
-        self.grind.adopt_mode_settings(grind);
-        self.ground_animation_settings = jumps;
-        self.animation_input.adopt_mode_settings(animation);
-        self.player_input.player.state_variants_1408 = player.player.state_variants_1408;
-        Ok(())
-    }
-
     pub(crate) fn travel_to(&mut self, transform: [[f32; 4]; 4]) -> Result<(), String> {
-        self.travel(transform, None)
-    }
-
-    pub(crate) fn travel(
-        &mut self,
-        transform: [[f32; 4]; 4],
-        velocity: Option<[f32; 3]>,
-    ) -> Result<(), String> {
-        self.player_input.request_teleport_ex(transform, velocity)?;
+        self.player_input.request_teleport(transform)?;
         self.teleport_state.request_manual(transform, true);
         Ok(())
     }
@@ -155,15 +116,28 @@ impl SkaterRuntime {
         asset_root: &Path, graphs: &StockGraphs, physics: &GamePhysics, mode: &str,
         source: Option<std::sync::Arc<crate::skater_animation::AnimationSource>>,
     ) -> Result<Self, String> {
-        let data = crate::custom_difficulty::load_collections(asset_root)?;
-        let banks = skate_data::animation_banks::AnimationBanks::load(asset_root)?;
-        let animation_metadata = banks.metadata()?;
+        let data = Collections::load(asset_root)?;
+        Self::load_for_world_data(asset_root, graphs, physics, mode, source, &data)
+    }
+
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    /// When a prepared `source` is present its animation banks and metadata are
+    /// reused, so only the per-world simulation state is rebuilt.
+    pub(crate) fn load_for_world_data(
+        asset_root: &Path, graphs: &StockGraphs, physics: &GamePhysics, mode: &str,
+        source: Option<std::sync::Arc<crate::skater_animation::AnimationSource>>,
+        data: &Collections,
+    ) -> Result<Self, String> {
         // The host's current character is a custom skater with no pro selector
         // or equipped physical hat. These are profile choices, not force values.
         let mut animation = match source {
-            Some(source) => SkaterAnimation::from_source(&data, graphs, b"", source)?,
-            None => SkaterAnimation::load(asset_root, &data, graphs, b"")?,
+            Some(source) => SkaterAnimation::from_source(data, graphs, b"", source)?,
+            None => SkaterAnimation::load(asset_root, data, graphs, b"")?,
         };
+        // `from_source`/`load` already built the metadata that the motion host
+        // owns; reuse it for the ground owner instead of rebuilding the banks.
+        let biped_ground = super::biped_ground::Owner::load(
+            data, animation.motion.animation.metadata())?;
         let initial_hierarchy = animation.evaluate_initial_pose()?;
         let mut animated_skeleton =
             AnimatedSkeleton::load(asset_root, &data, &animation.evaluator.frames, false)?;
@@ -285,7 +259,6 @@ impl SkaterRuntime {
             biped_air: super::biped_air::BipedAir::load(&data)?,
             landing_on_deck: super::landing_on_deck::Runtime::load(&data)?,
             landing_deck: super::offboard::landing_deck::Owner::load(&data)?,
-            grind_trick: Default::default(),
             ground_animation: Default::default(),
             ground_animation_settings: super::ground_animation::GroundAnimationSettings::load(&data)?,
             revert_state: super::revert_state::RevertState::load(&data)?,
@@ -299,7 +272,6 @@ impl SkaterRuntime {
             wipeout: super::wipeout::Wipeout::load(&data)?,
             wipeout_state,
             teleport_state: super::teleport_state::Runtime::new(
-                #[cfg(test)]
                 super::teleport_state::Checkpoint {
                     transform: spawn,
                     on_board: true,
@@ -307,9 +279,6 @@ impl SkaterRuntime {
             ),
             skeleton,
             skeleton_joints,
-            mod_joint_overrides: Default::default(),
-            mod_contact_frame: Default::default(),
-            mod_part_overrides: Default::default(),
             skeleton_drives,
             collision_feedback: skeleton_body::load_feedback(&data, skeleton_collision.settings)?,
             skeleton_collision,
@@ -335,7 +304,7 @@ impl SkaterRuntime {
             ground_profiles: super::ground_runtime::GroundProfiles::load(&data)?,
             ground_settings: std::sync::Arc::new(GroundSettings::load(&data, mode, "smooth")?),
             ground_lifecycle: super::ground_phase::GroundLifecycle::new(),
-            biped_ground: super::biped_ground::Owner::load(&data, &animation_metadata)?,
+            biped_ground,
             offboard_contact: Default::default(),
             offboard_air_selector: super::offboard::air_selector::AirSelector::new(
                 super::offboard::air_selector::Settings::load(&data)?,

@@ -1,6 +1,10 @@
 use bevy::prelude::Resource;
 use std::path::PathBuf;
 
+/// Decoded once per process and shared by every owner that reads stock values.
+#[derive(Resource, Clone)]
+pub(crate) struct StockCollections(pub std::sync::Arc<skate_data::collections::Collections>);
+
 #[derive(Resource)]
 pub(crate) struct Config {
     pub asset_root: PathBuf,

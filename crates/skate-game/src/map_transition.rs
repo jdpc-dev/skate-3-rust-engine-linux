@@ -10,8 +10,7 @@ use crate::{config::Config, map_library::Entry, map_render::PreparedScene,
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MapTransitionSet;
 #[derive(Message)]
-pub(crate) struct WorldChanged;
-
+pub(crate) struct WorldChanged { pub generation: u64 }
 
 #[cfg(test)]
 #[path = "tests/map_transition.rs"]
@@ -24,16 +23,12 @@ pub(crate) struct CurrentMap {
     pub spawn: [f32; 3],
     pub heading: f32,
     pub generation: u64,
-    /// The map's own audio definition: its `AUDO` extension (schema 1, UTF-8 JSON;
-    /// `game_audio::map_audio`), if it has one.
-    pub audio_tag: Option<Arc<[u8]>>,
 }
 impl CurrentMap {
     fn from_package(path: Option<PathBuf>, map: Option<&skate_data::skate_map::SkateMap>) -> Self {
         Self { path, name: map.map_or_else(|| "Test world".into(), |m| m.name.clone()),
             spawn: map.map_or([0., crate::physics::ground::HEIGHT, 0.], |m| m.spawn),
-            heading: map.map_or(0., |m| m.heading), generation: 0,
-            audio_tag: map.and_then(|m| m.extensions.iter().find(|e| e.tag == *b"AUDO" && e.schema == 1)).map(|e| Arc::from(&e.payload[..])) }
+            heading: map.map_or(0., |m| m.heading), generation: 0 }
     }
 }
 
@@ -46,7 +41,6 @@ struct PreparedWorld {
     camera: crate::camera::CameraRuntime,
     metadata: CurrentMap,
     retail: bool,
-    triggers: crate::trigger_volumes::TriggerVolumes,
     difficulty: crate::difficulty::Difficulty,
 }
 
@@ -86,9 +80,7 @@ impl Plugin for MapTransitionPlugin {
     fn build(&self, app: &mut App) {
         let config = app.world().resource::<Config>();
         let current = CurrentMap::from_package(config.map_path.clone(), config.map.as_ref());
-        app.insert_resource(current)
-            .init_resource::<MapTransition>()
-            .add_message::<WorldChanged>()
+        app.insert_resource(current).init_resource::<MapTransition>().add_message::<WorldChanged>()
             .add_systems(PreUpdate, poll.in_set(MapTransitionSet).after(crate::graphics_menu::MenuInput)
                 .before(crate::input::poll_controllers))
             .configure_sets(FixedUpdate, (
@@ -113,19 +105,25 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
     let job = std::thread::Builder::new().name("map-loader".into()).spawn(move || {
         let _span = info_span!("load_map_transition").entered();
         let started = Instant::now();
+        let map_started = Instant::now();
         let map = info_span!("read_map").in_scope(|| selected.path.as_deref().map(skate_data::skate_map::SkateMap::load).transpose())?;
         let map_fingerprint = crate::config::map_fingerprint(selected.path.as_deref())?;
+        let map_time = map_started.elapsed();
+        // Decode the shared stock collections once and hand the same values to
+        // physics, skater, controls and camera instead of re-parsing per owner.
+        let collections_started = Instant::now();
+        let collections = info_span!("load_collections").in_scope(|| skate_data::collections::Collections::load(&root))?;
+        let collections_time = collections_started.elapsed();
         let read_time = started.elapsed();
         let validation_started = Instant::now();
         if let Some(map) = &map { crate::skate_world::validate_runtime(map)?; }
         let validation_time = validation_started.elapsed();
-        let triggers = crate::trigger_volumes::TriggerVolumes::load_or_warn(selected.path.as_deref(), map.as_ref());
         let metadata = CurrentMap::from_package(selected.path, map.as_ref());
         let retail = map.as_ref().is_some_and(|m| crate::retail_render::RetailScene::for_map(m));
         // Both builders only read the decoded package. Reserve render handles
         // on a second worker while the first constructs fresh simulation state;
         // neither publishes to the live world until both have succeeded.
-        let (physics, skater, controls, camera, simulation_time, render_time) =
+        let (physics, skater, controls, camera, simulation_time, render_time, phases) =
             std::thread::scope(|scope| -> Result<_, String> {
                 let rendering = std::thread::Builder::new().name("map-render-loader".into())
                     .spawn_scoped(scope, || {
@@ -136,13 +134,22 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
                 let simulation_started = Instant::now();
                 let simulation = (|| -> Result<_, String> {
                     stage.store(1, Ordering::Relaxed);
-                    let physics = info_span!("load_physics").in_scope(|| GamePhysics::load_with_difficulty(&root, map.as_ref(), difficulty))?;
+                    let physics_started = Instant::now();
+                    let physics = info_span!("load_physics").in_scope(|| GamePhysics::load_with_difficulty_data(&root, map.as_ref(), difficulty, &collections))?;
+                    let physics_time = physics_started.elapsed();
                     stage.store(2, Ordering::Relaxed);
-                    let skater = SkaterRuntime::load_for_world(&root, &graphs, &physics, difficulty.profile_key(), Some(source))?;
-                    let mut controls = PlayerControls::load(&root)?;
+                    let skater_started = Instant::now();
+                    let skater = SkaterRuntime::load_for_world_data(&root, &graphs, &physics, difficulty.key(), Some(source), &collections)?;
+                    let skater_time = skater_started.elapsed();
+                    let controls_started = Instant::now();
+                    let mut controls = PlayerControls::load_with_data(&root, &collections)?;
                     controls.preferences = preferences;
-                    let camera = crate::camera::CameraRuntime::load(&root)?;
-                    Ok((physics, skater, controls, camera))
+                    let controls_time = controls_started.elapsed();
+                    let camera_started = Instant::now();
+                    let camera = crate::camera::CameraRuntime::load_with_data(&root, &collections)?;
+                    let camera_time = camera_started.elapsed();
+                    Ok((physics, skater, controls, camera,
+                        (physics_time, skater_time, controls_time, camera_time)))
                 })();
                 let simulation_time = simulation_started.elapsed();
                 stage.store(3, Ordering::Relaxed);
@@ -150,15 +157,18 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
                 // render work or reserved scene can outlive a failed request.
                 let render_time = rendering.join()
                     .map_err(|_| "Map render preparation failed unexpectedly".to_string())?;
-                let (physics, skater, controls, camera) = simulation?;
-                Ok((physics, skater, controls, camera, simulation_time, render_time))
+                let (physics, skater, controls, camera, phases) = simulation?;
+                Ok((physics, skater, controls, camera, simulation_time, render_time, phases))
             })?;
-        eprintln!("MAP_LOAD_TIMING name={:?} read_ms={} validation_ms={} simulation_ms={} render_ms={} prepare_ms={} parallel=true",
-            metadata.name, read_time.as_millis(), validation_time.as_millis(),
+        let (physics_time, skater_time, controls_time, camera_time) = phases;
+        eprintln!("MAP_LOAD_TIMING name={:?} read_ms={} map_ms={} collections_ms={} validation_ms={} physics_ms={} skater_ms={} controls_ms={} camera_ms={} simulation_ms={} render_ms={} prepare_ms={} parallel=true",
+            metadata.name, read_time.as_millis(), map_time.as_millis(), collections_time.as_millis(),
+            validation_time.as_millis(), physics_time.as_millis(), skater_time.as_millis(),
+            controls_time.as_millis(), camera_time.as_millis(),
             simulation_time.as_millis(), render_time.as_millis(), started.elapsed().as_millis());
         // Drop the decoded package on this worker. Physics and rendering now
         // own their data; retaining it would double large-city CPU memory.
-        Ok(PreparedWorld { map_fingerprint, scene, physics, skater, controls, camera, metadata, retail, triggers, difficulty })
+        Ok(PreparedWorld { map_fingerprint, scene, physics, skater, controls, camera, metadata, retail, difficulty })
     }).map_err(|e| format!("Could not start map loader: {e}"))?;
     Ok(Phase::Loading { entry, progress, job })
 }
@@ -214,9 +224,6 @@ fn commit(world: &mut World, mut prepared: PreparedWorld) -> String {
     prepared.scene.publish(world);
     crate::camera::set_world_environment(world, prepared.retail);
     world.insert_resource(crate::retail_render::RetailScene(prepared.retail));
-    info!("SKATE_TRIGGERS map={:?} volumes={} source={}", prepared.metadata.name, prepared.triggers.map.len(), prepared.triggers.origin);
-    // Mod-added volumes and switches are world-scoped, like sdk.volumes.
-    world.insert_resource(prepared.triggers);
     world.insert_resource(crate::grind_world::GrindGeometry::for_world(prepared.metadata.path.is_none()));
     world.insert_resource(Time::<Fixed>::from_duration(prepared.physics.period()));
     let root_transform = Transform::from_matrix(crate::animation::native_matrix(
@@ -243,7 +250,7 @@ fn commit(world: &mut World, mut prepared: PreparedWorld) -> String {
         prepared.metadata.generation, prepared.metadata.name, prepared.metadata.spawn,
         prepared.metadata.heading, std::process::id());
     if let Some(mut messages) = world.get_resource_mut::<Messages<WorldChanged>>() {
-        messages.write(WorldChanged);
+        messages.write(WorldChanged { generation: prepared.metadata.generation });
     }
     world.insert_resource(prepared.metadata);
     eprintln!("MAP_PUBLISH_TIMING cpu_ms={}", publication_started.elapsed().as_millis());
