@@ -8,6 +8,14 @@ from tools.asset_pipeline.customisation_catalog import write_private
 from tools.owned_game.big import BigArchive
 from tools.asset_pipeline.optional_content import CONTENT_ERRORS
 
+# Retail authored these shipped materials without `cas.IsColourizable`, so the
+# customiser hides its clothing colours for them. Expose the native palette for
+# these specific items; every other item still follows the extracted flag.
+COLOURIZABLE_ITEMS = {
+    '00000c6803e38817',                    # Cargo Shorts 1
+    '2c7f38170017232c', '2c7f38170017232d',  # Thunder Shoes (New / Worn)
+}
+
 def friendly(name):
     text=name.lower().replace('_',' ')
     replacements=[('shortsleeve','short sleeve'),('longsleeve','long sleeve'),('tshirt','tee'),
@@ -163,6 +171,9 @@ def prepare(config):
                 bounds=[float(v) for v in mat['flags']['cas.StampBorderConstraint'].split(',')])
         except CONTENT_ERRORS as error:
             errors.append(dict(tattoo=variant.get('id'),error=str(error)))
+    for mid in COLOURIZABLE_ITEMS:
+        if mid in mat_data:
+            mat_data[mid]['flags']['IsColourizable']='true'
     prune_unavailable(model_data,mat_data,errors)
     male=default_profile();male['gender']='male'
     female=copy.deepcopy(male);female['gender']='female';female['selections']={}
