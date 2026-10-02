@@ -455,6 +455,36 @@ fn fingerprints_are_portable_and_include_assets() {
     std::fs::write(b.0.join("mods/example/asset.txt"),"changed").unwrap();
     assert_ne!(first,b.manager().packages["example"].content_fingerprint());
 }
+/// The rescan caches per-file digests by mtime and size, so a same-length edit
+/// is the case most likely to be missed. It must still be noticed on rescan.
+#[test]
+fn rescan_notices_same_length_content_change() {
+    let f=Fixture::new("return {}");
+    let path=f.0.join("mods/example/asset.txt");
+    std::fs::write(&path,"AAAA").unwrap();
+    let mut m=f.manager();
+    let first=m.packages["example"].content_fingerprint();
+    std::fs::write(&path,"BBBB").unwrap();
+    m.scan(true);
+    assert_ne!(first,m.packages["example"].content_fingerprint());
+}
+/// Deleting a file must not leave a stale digest behind, and re-adding it must
+/// restore the original fingerprint.
+#[test]
+fn rescan_handles_removed_and_restored_files() {
+    let f=Fixture::new("return {}");
+    let asset=f.0.join("mods/example/asset.txt");
+    std::fs::write(&asset,"AAAA").unwrap();
+    let mut m=f.manager();
+    let with=m.packages["example"].content_fingerprint();
+    std::fs::remove_file(&asset).unwrap();
+    m.scan(true);
+    let without=m.packages["example"].content_fingerprint();
+    assert_ne!(with,without);
+    std::fs::write(&asset,"AAAA").unwrap();
+    m.scan(true);
+    assert_eq!(with,m.packages["example"].content_fingerprint());
+}
 #[test]
 fn shared_state_api_is_owner_scoped_and_transactional() {
     let f=Fixture::new(r#"return {on_update=function()

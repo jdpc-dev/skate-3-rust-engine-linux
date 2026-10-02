@@ -6,6 +6,9 @@ const LIMIT: u64 = 64 * 1024 * 1024;
 pub(crate) struct Cache {
     session: Option<PathBuf>,
     entries: BTreeMap<PathBuf, (blake3::Hash, PathBuf)>,
+    /// Cheap identity stamp (mtime, size) per archive, so an unchanged archive
+    /// skips the read-and-hash that would otherwise run on every scan.
+    stamps: BTreeMap<PathBuf, (Option<std::time::SystemTime>, u64)>,
     next: u64,
 }
 
@@ -27,6 +30,16 @@ fn safe_name(name: &str) -> Result<PathBuf, String> {
 
 impl Cache {
     pub fn materialize(&mut self, root: &Path, archive: &Path) -> Result<PathBuf, String> {
+        // Steady state: the archive is untouched, so its bytes cannot differ.
+        // Identifying it by mtime and size keeps the 500ms rescan off the
+        // multi-megabyte read plus blake3 hash it used to pay unconditionally.
+        let meta = std::fs::metadata(archive).map_err(|e| e.to_string())?;
+        let stamp = (meta.modified().ok(), meta.len());
+        if self.stamps.get(archive) == Some(&stamp) {
+            if let Some((_, path)) = self.entries.get(archive) {
+                return Ok(path.clone());
+            }
+        }
         let mut bytes = Vec::new();
         std::fs::File::open(archive).map_err(|e| e.to_string())?.take(LIMIT + 1)
             .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -81,6 +94,7 @@ impl Cache {
                 .and_then(|mut f| f.write_all(&contents)).map_err(|e| e.to_string())?;
         }
         self.entries.insert(archive.to_owned(), (hash, destination.clone()));
+        self.stamps.insert(archive.to_owned(), stamp);
         Ok(destination)
     }
 }
@@ -95,5 +109,53 @@ impl Drop for Cache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn zip_with(payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        w.start_file("mod.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(br#"{"id":"example"}"#).unwrap();
+        w.start_file("payload.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(payload).unwrap();
+        w.finish().unwrap();
+        buf
+    }
+
+    /// Steady state must reuse the extracted directory without re-reading, but a
+    /// rewritten archive must still be re-extracted.
+    #[test]
+    fn unchanged_archive_skips_work_and_changed_one_is_reextracted() {
+        let dir = std::env::temp_dir().join(format!("skate-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("example.zip");
+        std::fs::write(&archive, zip_with(b"FIRST")).unwrap();
+
+        let mut cache = Cache::default();
+        let first = cache.materialize(&dir, &archive).unwrap();
+        assert_eq!(std::fs::read(first.join("payload.txt")).unwrap(), b"FIRST");
+
+        // Same bytes: the stamp matches and the cached extraction is reused.
+        let again = cache.materialize(&dir, &archive).unwrap();
+        assert_eq!(again, first);
+
+        // Same length, new mtime: re-extracted with the new contents.
+        let later = std::fs::metadata(&archive).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        std::fs::write(&archive, zip_with(b"SECOND")).unwrap();
+        let f = std::fs::File::options().write(true).open(&archive).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(later)).unwrap();
+        drop(f);
+        let second = cache.materialize(&dir, &archive).unwrap();
+        assert_eq!(std::fs::read(second.join("payload.txt")).unwrap(), b"SECOND");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
