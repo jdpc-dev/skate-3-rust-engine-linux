@@ -328,3 +328,44 @@ tool that made this checkable without relying on frame times. It runs 240 ticks
 on `Flat` and `Course` and digests body rates, skeleton rates and poses,
 `solved_contacts()` and `contact_reports()`, and it is what any future physics
 change must pass before it is considered.
+
+## Main-thread cost is Bevy framework overhead, not game logic
+
+The main thread was measured at 8.11 ms per frame (median of 3 release runs,
+University) with 7.95 ms of it reported as `main_schedule_ms_mean`, which spans
+`First` through `Last`. Only 1.05 ms of that was the game's own work: bracketing
+each of the four `FrameSet`s that `app.rs` chains in `Update` accounts for
+`set_animation` 0.82, `set_verification` 0.12, `set_assets` 0.05 and
+`set_physics` 0.04 ms, and bracketing the whole of `Update` measures 1.05 ms, so
+almost nothing of the schedule sits outside those sets either.
+
+The rest is Bevy framework work in the phases the game does not own:
+
+| block | ms |
+| --- | --- |
+| game logic (`Update`, all four `FrameSet`s) | 1.05 |
+| `bevy_transform` propagation (`PostUpdate`) | 1.44 |
+| `bevy_ui` layout (`PostUpdate`) | 0.77 |
+| `bevy_ui` focus (`PreUpdate`) | 0.68 |
+| `First` after the frame timer | 0.01 |
+| unaccounted in `PreUpdate`/`PostUpdate`/`Last` | ~4.17 |
+
+The conclusion that matters for prioritisation: game logic is about 13% of
+main-thread time, so shaving milliseconds out of our own systems cannot close a
+4 ms gap. Transform propagation and UI together are 2.9 ms, which is where the
+next real work is. The unaccounted remainder is spread across the phases the
+game does not configure, and these brackets are wall-clock spans in a
+multi-threaded executor, so the numbers do not sum to the schedule total.
+
+This was measured by temporarily bracketing each `FrameSet` and each Bevy
+system set with the existing `Scope` mechanism, then removing the brackets. They
+are not left in the tree because Bevy 0.18 has no per-system timing available
+without pulling in a crate that is not in the lockfile, so the brackets would
+have to be maintained by hand and they add schedule nodes to every frame.
+
+Two measurements that do not reconcile, recorded rather than quietly averaged:
+this run reports `frame_ms_mean` 11.75 ms, while an earlier release run reported
+20.62 ms on the same map. The earlier reports are no longer on disk and the map,
+settings and build differ between the two, so the older figure could not be
+reproduced or explained. The A/B comparisons in this document are internally
+consistent because both sides carried identical instrumentation.
