@@ -100,8 +100,13 @@ fn main() -> bevy::app::AppExit {
         }
     }
     eprintln!("SKATE_DIFFICULTY mode={} native_index={}", config.difficulty.key(), config.difficulty as u32);
+    eprintln!("REPORT_META stage=stock_collections");
+    let collections = match bevy::log::info_span!("load_collections").in_scope(|| skate_data::collections::Collections::load(&config.asset_root)) {
+        Ok(collections) => collections,
+        Err(error) => { eprintln!("{error}"); return bevy::app::AppExit::error(); }
+    };
     eprintln!("REPORT_META stage=physics_initialization");
-    let mut physics = match bevy::log::info_span!("load_physics").in_scope(|| physics::GamePhysics::load_with_difficulty(&config.asset_root, config.map.as_ref(), config.difficulty)) {
+    let mut physics = match bevy::log::info_span!("load_physics").in_scope(|| physics::GamePhysics::load_with_difficulty_data(&config.asset_root, config.map.as_ref(), config.difficulty, &collections)) {
         Ok(physics) => physics,
         Err(error) => {
             eprintln!("{error}");
@@ -114,7 +119,7 @@ fn main() -> bevy::app::AppExit {
         physics.board.set_transform(spawn);
     }
     eprintln!("REPORT_META stage=skater_initialization");
-    let skater = match bevy::log::info_span!("load_skater").in_scope(|| physics::SkaterRuntime::load(&config.asset_root, &graphs, &physics, config.difficulty.key())) {
+    let skater = match bevy::log::info_span!("load_skater").in_scope(|| physics::SkaterRuntime::load_for_world_data(&config.asset_root, &graphs, &physics, config.difficulty.key(), None, &collections)) {
         Ok(skater) => skater,
         Err(error) => {
             eprintln!("{error}");
@@ -122,12 +127,12 @@ fn main() -> bevy::app::AppExit {
         }
     };
     eprintln!("REPORT_META stage=controls_initialization");
-    let controls = match physics::PlayerControls::load(&config.asset_root) {
+    let controls = match physics::PlayerControls::load_with_data(&config.asset_root, &collections) {
         Ok(controls) => controls,
         Err(error) => { eprintln!("{error}"); return bevy::app::AppExit::error(); }
     };
     if config.check_assets {
-        if let Err(error) = camera::CameraRuntime::load(&config.asset_root) {
+        if let Err(error) = camera::CameraRuntime::load_with_data(&config.asset_root, &collections) {
             eprintln!("{error}");
             return bevy::app::AppExit::error();
         }
@@ -136,6 +141,7 @@ fn main() -> bevy::app::AppExit {
     }
     eprintln!("REPORT_META stage=renderer_and_app_initialization");
     let mut app = app::build(config, manifest, graphs, physics, skater);
+    app.insert_resource(crate::config::StockCollections(std::sync::Arc::new(collections)));
     app.insert_resource(controls);
     eprintln!("REPORT_META stage=app_run");
     drop(_startup);

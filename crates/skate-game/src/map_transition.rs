@@ -105,8 +105,15 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
     let job = std::thread::Builder::new().name("map-loader".into()).spawn(move || {
         let _span = info_span!("load_map_transition").entered();
         let started = Instant::now();
+        let map_started = Instant::now();
         let map = info_span!("read_map").in_scope(|| selected.path.as_deref().map(skate_data::skate_map::SkateMap::load).transpose())?;
         let map_fingerprint = crate::config::map_fingerprint(selected.path.as_deref())?;
+        let map_time = map_started.elapsed();
+        // Decode the shared stock collections once and hand the same values to
+        // physics, skater, controls and camera instead of re-parsing per owner.
+        let collections_started = Instant::now();
+        let collections = info_span!("load_collections").in_scope(|| skate_data::collections::Collections::load(&root))?;
+        let collections_time = collections_started.elapsed();
         let read_time = started.elapsed();
         let validation_started = Instant::now();
         if let Some(map) = &map { crate::skate_world::validate_runtime(map)?; }
@@ -116,7 +123,7 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
         // Both builders only read the decoded package. Reserve render handles
         // on a second worker while the first constructs fresh simulation state;
         // neither publishes to the live world until both have succeeded.
-        let (physics, skater, controls, camera, simulation_time, render_time) =
+        let (physics, skater, controls, camera, simulation_time, render_time, phases) =
             std::thread::scope(|scope| -> Result<_, String> {
                 let rendering = std::thread::Builder::new().name("map-render-loader".into())
                     .spawn_scoped(scope, || {
@@ -127,13 +134,22 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
                 let simulation_started = Instant::now();
                 let simulation = (|| -> Result<_, String> {
                     stage.store(1, Ordering::Relaxed);
-                    let physics = info_span!("load_physics").in_scope(|| GamePhysics::load_with_difficulty(&root, map.as_ref(), difficulty))?;
+                    let physics_started = Instant::now();
+                    let physics = info_span!("load_physics").in_scope(|| GamePhysics::load_with_difficulty_data(&root, map.as_ref(), difficulty, &collections))?;
+                    let physics_time = physics_started.elapsed();
                     stage.store(2, Ordering::Relaxed);
-                    let skater = SkaterRuntime::load_for_world(&root, &graphs, &physics, difficulty.key(), Some(source))?;
-                    let mut controls = PlayerControls::load(&root)?;
+                    let skater_started = Instant::now();
+                    let skater = SkaterRuntime::load_for_world_data(&root, &graphs, &physics, difficulty.key(), Some(source), &collections)?;
+                    let skater_time = skater_started.elapsed();
+                    let controls_started = Instant::now();
+                    let mut controls = PlayerControls::load_with_data(&root, &collections)?;
                     controls.preferences = preferences;
-                    let camera = crate::camera::CameraRuntime::load(&root)?;
-                    Ok((physics, skater, controls, camera))
+                    let controls_time = controls_started.elapsed();
+                    let camera_started = Instant::now();
+                    let camera = crate::camera::CameraRuntime::load_with_data(&root, &collections)?;
+                    let camera_time = camera_started.elapsed();
+                    Ok((physics, skater, controls, camera,
+                        (physics_time, skater_time, controls_time, camera_time)))
                 })();
                 let simulation_time = simulation_started.elapsed();
                 stage.store(3, Ordering::Relaxed);
@@ -141,11 +157,14 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
                 // render work or reserved scene can outlive a failed request.
                 let render_time = rendering.join()
                     .map_err(|_| "Map render preparation failed unexpectedly".to_string())?;
-                let (physics, skater, controls, camera) = simulation?;
-                Ok((physics, skater, controls, camera, simulation_time, render_time))
+                let (physics, skater, controls, camera, phases) = simulation?;
+                Ok((physics, skater, controls, camera, simulation_time, render_time, phases))
             })?;
-        eprintln!("MAP_LOAD_TIMING name={:?} read_ms={} validation_ms={} simulation_ms={} render_ms={} prepare_ms={} parallel=true",
-            metadata.name, read_time.as_millis(), validation_time.as_millis(),
+        let (physics_time, skater_time, controls_time, camera_time) = phases;
+        eprintln!("MAP_LOAD_TIMING name={:?} read_ms={} map_ms={} collections_ms={} validation_ms={} physics_ms={} skater_ms={} controls_ms={} camera_ms={} simulation_ms={} render_ms={} prepare_ms={} parallel=true",
+            metadata.name, read_time.as_millis(), map_time.as_millis(), collections_time.as_millis(),
+            validation_time.as_millis(), physics_time.as_millis(), skater_time.as_millis(),
+            controls_time.as_millis(), camera_time.as_millis(),
             simulation_time.as_millis(), render_time.as_millis(), started.elapsed().as_millis());
         // Drop the decoded package on this worker. Physics and rendering now
         // own their data; retaining it would double large-city CPU memory.

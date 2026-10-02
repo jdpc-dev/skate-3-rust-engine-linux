@@ -899,12 +899,24 @@ fn labels(
         };
     }
 }
-fn pace(menu: Option<Res<Menu>>, mut pacer: ResMut<FramePacer>) {
+/// While a map is being prepared, most CPU/GPU time belongs to the loader.
+/// Cap the render loop even when the player left the FPS limit at unlimited.
+const LOAD_FPS: u32 = 5;
+fn pace(
+    menu: Option<Res<Menu>>,
+    transition: Option<Res<crate::map_transition::MapTransition>>,
+    mut pacer: ResMut<FramePacer>,
+) {
     let Some(menu) = menu else {
         return;
     };
-    if menu.settings.fps > 0 {
-        let period = Duration::from_secs_f64(1. / f64::from(menu.settings.fps));
+    let fps = if transition.is_some_and(|t| t.busy()) {
+        LOAD_FPS
+    } else {
+        menu.settings.fps
+    };
+    if fps > 0 {
+        let period = Duration::from_secs_f64(1. / f64::from(fps));
         if let Some(wait) = period.checked_sub(pacer.0.elapsed()) {
             std::thread::sleep(wait);
         }

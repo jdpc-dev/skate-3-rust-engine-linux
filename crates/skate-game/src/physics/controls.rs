@@ -114,8 +114,14 @@ impl PlayerControls {
     }
 
     pub fn load(root: &std::path::Path) -> Result<Self, String> {
+        let data = skate_data::collections::Collections::load(root)?;
+        Self::load_with_data(root, &data)
+    }
+
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    pub(crate) fn load_with_data(root: &std::path::Path, data: &skate_data::collections::Collections) -> Result<Self, String> {
         Ok(Self {
-            gestures: Some(crate::input::gesture_input::GestureInput::load(root)?),
+            gestures: Some(crate::input::gesture_input::GestureInput::load_with_data(root, data)?),
             ..Self::default()
         })
     }

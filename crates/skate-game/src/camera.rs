@@ -33,8 +33,13 @@ impl Plugin for CameraPlugin {
             .add_systems(Update, present.after(FrameSet::Animation).before(FrameSet::Verification));
     }
 }
-fn spawn(mut commands: Commands, config: Res<Config>, retail: Res<crate::retail_render::RetailScene>) {
-    let runtime = CameraRuntime::load(&config.asset_root)
+fn spawn(mut commands: Commands, config: Res<Config>, retail: Res<crate::retail_render::RetailScene>,
+    collections: Option<Res<crate::config::StockCollections>>) {
+    let loaded = match collections {
+        Some(collections) => CameraRuntime::load_with_data(&config.asset_root, &collections.0),
+        None => CameraRuntime::load(&config.asset_root),
+    };
+    let runtime = loaded
         .unwrap_or_else(|error| panic!("Cannot initialize normal gameplay camera: {error}"));
     commands.insert_resource(runtime);
     let mut camera = commands.spawn((
@@ -57,7 +62,17 @@ pub(crate) fn present(vehicles: Res<crate::modding::vehicles::Vehicles>, mut run
     replay: Res<crate::replay::Replay>,
     virtual_time: Res<Time<Virtual>>, mut vehicle_blend: Local<VehicleCameraBlend>,
     customiser: Option<Res<crate::customiser::Customiser>>,
+    transition: Option<Res<crate::map_transition::MapTransition>>,
     mut cameras: Query<(&mut Camera, &mut Transform, &mut Projection), With<GameplayCamera>>) {
+    // The loader needs the CPU/GPU while a map is prepared. Stop presenting the
+    // outgoing world so it is not re-rendered every frame; the menu overlay has
+    // its own camera and keeps drawing over the last frozen frame.
+    if transition.is_some_and(|t| t.busy()) {
+        for (mut camera, _, _) in &mut cameras {
+            camera.is_active = false;
+        }
+        return;
+    }
     if let Ok(window) = windows.single() {
         runtime.set_aspect_ratio(window.width() / window.height());
     }

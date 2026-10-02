@@ -37,6 +37,11 @@ mod tests;
 impl CameraRuntime {
     pub fn load(root: &Path) -> Result<Self, String> {
         let data = Collections::load(root)?;
+        Self::load_with_data(root, &data)
+    }
+
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    pub(crate) fn load_with_data(root: &Path, data: &Collections) -> Result<Self, String> {
         let values = data.words::<32>("slowmotion_controller", "default", "timescale")?
             .map(f32::from_bits);
         let slow_motion = SlowMotionSettings {
@@ -54,8 +59,8 @@ impl CameraRuntime {
                 .map_err(|e| format!("{}: {e}", path.display()))?)
         };
         Ok(Self { manager: CameraMan::new(), subject: SubjectPublisher::new(), graph,
-            shots: StockShots::from_collections(&data)?, settings: settings::manager_settings(&data)?,
-            compass_settings: settings::compass_settings(&data)?, shakes: [samples("1.shk")?, samples("2.shk")?],
+            shots: StockShots::from_collections(data)?, settings: settings::manager_settings(data)?,
+            compass_settings: settings::compass_settings(data)?, shakes: [samples("1.shk")?, samples("2.shk")?],
             trajectories: core::array::from_fn(|_| TrajectoryResult::new()), frame: None,
             latest_subject: None,
             simulation_rate_requests: Vec::new() })

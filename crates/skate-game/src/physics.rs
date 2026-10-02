@@ -255,7 +255,8 @@ impl GamePhysics {
         terrain: ground::Terrain,
         map: Option<&skate_data::skate_map::SkateMap>,
     ) -> Result<Self, String> {
-        Self::load_world_difficulty(asset_root, terrain, map, crate::difficulty::Difficulty::Easy)
+        let data = Collections::load(asset_root)?;
+        Self::load_world_difficulty(asset_root, terrain, map, crate::difficulty::Difficulty::Easy, &data)
     }
 
     pub fn load_with_map(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>) -> Result<Self, String> {
@@ -263,13 +264,18 @@ impl GamePhysics {
     }
 
     pub fn load_with_difficulty(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty) -> Result<Self, String> {
-        Self::load_world_difficulty(asset_root, ground::Terrain::Course, map, difficulty)
+        let data = Collections::load(asset_root)?;
+        Self::load_with_difficulty_data(asset_root, map, difficulty, &data)
     }
 
-    fn load_world_difficulty(asset_root: &std::path::Path, terrain: ground::Terrain, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty) -> Result<Self, String> {
-        let data = Collections::load(asset_root)?;
-        let settings = PhysicsSettings::load(&data)?;
-        let animation_profile = animation_phase::AnimationProfile::load(&data, difficulty.key())?;
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    pub(crate) fn load_with_difficulty_data(asset_root: &std::path::Path, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty, data: &Collections) -> Result<Self, String> {
+        Self::load_world_difficulty(asset_root, ground::Terrain::Course, map, difficulty, data)
+    }
+
+    fn load_world_difficulty(_asset_root: &std::path::Path, terrain: ground::Terrain, map: Option<&skate_data::skate_map::SkateMap>, difficulty: crate::difficulty::Difficulty, data: &Collections) -> Result<Self, String> {
+        let settings = PhysicsSettings::load(data)?;
+        let animation_profile = animation_phase::AnimationProfile::load(data, difficulty.key())?;
         eprintln!(
             "SKATE_PHYSICS_MODE {} index={}",
             difficulty.key(), animation_profile.physics_mode
@@ -321,7 +327,7 @@ impl GamePhysics {
         let offboard_grab_scene =
             offboard::grab_scene::Registry::new(&world, Vec::new(), Vec::new())?;
         let processed_flags_2468 = 0x2000;
-        let riding = RidingOutputs::load(&data, &board, processed_flags_2468)?;
+        let riding = RidingOutputs::load(data, &board, processed_flags_2468)?;
         let (query, retention) = ground::query_settings();
         Ok(Self {
             network_proxies: network::Proxies::default(),

@@ -117,14 +117,27 @@ impl SkaterRuntime {
         source: Option<std::sync::Arc<crate::skater_animation::AnimationSource>>,
     ) -> Result<Self, String> {
         let data = Collections::load(asset_root)?;
-        let banks = skate_data::animation_banks::AnimationBanks::load(asset_root)?;
-        let animation_metadata = banks.metadata()?;
+        Self::load_for_world_data(asset_root, graphs, physics, mode, source, &data)
+    }
+
+    /// Reuse an already-decoded stock collection set instead of re-reading it.
+    /// When a prepared `source` is present its animation banks and metadata are
+    /// reused, so only the per-world simulation state is rebuilt.
+    pub(crate) fn load_for_world_data(
+        asset_root: &Path, graphs: &StockGraphs, physics: &GamePhysics, mode: &str,
+        source: Option<std::sync::Arc<crate::skater_animation::AnimationSource>>,
+        data: &Collections,
+    ) -> Result<Self, String> {
         // The host's current character is a custom skater with no pro selector
         // or equipped physical hat. These are profile choices, not force values.
         let mut animation = match source {
-            Some(source) => SkaterAnimation::from_source(&data, graphs, b"", source)?,
-            None => SkaterAnimation::load(asset_root, &data, graphs, b"")?,
+            Some(source) => SkaterAnimation::from_source(data, graphs, b"", source)?,
+            None => SkaterAnimation::load(asset_root, data, graphs, b"")?,
         };
+        // `from_source`/`load` already built the metadata that the motion host
+        // owns; reuse it for the ground owner instead of rebuilding the banks.
+        let biped_ground = super::biped_ground::Owner::load(
+            data, animation.motion.animation.metadata())?;
         let initial_hierarchy = animation.evaluate_initial_pose()?;
         let mut animated_skeleton =
             AnimatedSkeleton::load(asset_root, &data, &animation.evaluator.frames, false)?;
@@ -291,7 +304,7 @@ impl SkaterRuntime {
             ground_profiles: super::ground_runtime::GroundProfiles::load(&data)?,
             ground_settings: std::sync::Arc::new(GroundSettings::load(&data, mode, "smooth")?),
             ground_lifecycle: super::ground_phase::GroundLifecycle::new(),
-            biped_ground: super::biped_ground::Owner::load(&data, &animation_metadata)?,
+            biped_ground,
             offboard_contact: Default::default(),
             offboard_air_selector: super::offboard::air_selector::AirSelector::new(
                 super::offboard::air_selector::Settings::load(&data)?,
