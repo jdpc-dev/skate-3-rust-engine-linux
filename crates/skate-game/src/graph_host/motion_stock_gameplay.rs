@@ -120,9 +120,6 @@ pub enum Operation {
     UpdateStandingOnCar,
     InitMovingObjects { path: String },
     MovingObject { path: String },
-    CreateGrindAttributes,
-    ControlGrindCrouch,
-    GrindControlFade,
     SetGrabType { grab: String },
     JumpInto { attribute: AttributeName },
     ScoringHandPlants,
@@ -163,9 +160,6 @@ impl Operation {
                 | "UpdateStandingOnCar"
                 | "InitMovingObjects"
                 | "MovingObject"
-                | "CreateGrindAttributes"
-                | "ControlGrindCrouch"
-                | "GrindControlFade"
                 | "SetGrabType"
                 | "JumpInto" | "ScoringHandPlants" | "SetHandPlantAnticLength"
                 | "ScoringGrabs" | "AirDismounting" | "TweakProject"
@@ -186,9 +180,6 @@ impl Operation {
             "MovingObject" => Self::MovingObject {
                 path: authored_path(a),
             },
-            "CreateGrindAttributes" => Self::CreateGrindAttributes,
-            "ControlGrindCrouch" => Self::ControlGrindCrouch,
-            "GrindControlFade" => Self::GrindControlFade,
             "SetGrabType" => Self::SetGrabType { grab: a.text("grab").unwrap_or("").to_owned() },
             "JumpInto" => Self::JumpInto {
                 attribute: encode(

@@ -114,6 +114,9 @@ fn controller_replay_scrub_camera_and_exit_do_not_leak_gameplay_input() {
     use skate_core::input::xbox::XboxState;
     let mut app = App::new();
     app.init_resource::<Replay>()
+        // `controls` requires this to gate enter/exit while driving a vehicle.
+        // The default has no driver, so replay stays available.
+        .init_resource::<crate::modding::vehicles::Vehicles>()
         .init_resource::<ControllerInput>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>()

@@ -162,7 +162,22 @@ fn predictive_contacts_and_retention_match_full_scan_for_every_primitive() {
     let mut triangles = tiled();
     triangles.insert(0, face(0., 9000, 0.02));
     triangles.insert(0, face(0., 9001, 0.02));
-    let mut linear = BoardWorld::new(triangles.clone());
+    // The full-scan reference may only cover the triangles the broadphase is
+    // allowed to hand to the narrow phase. Scanning all 1026 tiles is not a
+    // valid oracle: `tiled()` is coplanar, so a sphere and a tile separate
+    // only along the shared face normal and `world_separation_limit` cannot
+    // tell a near tile from one 10,000 units away. Only the board-world
+    // broadphase rejects those, and every production world builds through
+    // `with_query_metadata`, where that cull is always active. The
+    // accelerated world below keeps the full set, so the index and the cull
+    // are still exercised.
+    let reference: Vec<_> = triangles
+        .iter()
+        .filter(|t| t.triangle.vertices.iter().all(|p| p.x.abs() <= 8.))
+        .cloned()
+        .collect();
+    assert_eq!(reference.len(), 3, "9001, 9000 and the x = 0 tile");
+    let mut linear = BoardWorld::new(reference);
     let mut world = annotated(triangles);
     let center = Vector3::new(-0.7, 0.25, -0.7);
     let primitives = [

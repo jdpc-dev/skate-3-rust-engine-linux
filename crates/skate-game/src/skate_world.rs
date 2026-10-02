@@ -1163,10 +1163,13 @@ mod tests {
         let mut scene = crate::map_render::PreparedScene::new(&world);
         scene.prepare(Some(&map), std::path::Path::new("unused"));
         scene.publish(&mut world);
-        assert_eq!(world.resource::<Assets<Mesh>>().len(), 1);
-        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 1);
-        assert_eq!(world.resource::<Assets<Image>>().len(), 2);
-        assert_eq!(world.query::<&Mesh3d>().iter(&world).count(), 1);
+        // The map contributes 1 mesh / 1 material / 2 textures / 1 entity.
+        // `celestial_bodies` adds the sun and moon discs, which share one disc
+        // mesh but each get their own material and procedural 256px texture.
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 2);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 3);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 4);
+        assert_eq!(world.query::<&Mesh3d>().iter(&world).count(), 3);
         let lightmap = world
             .query::<&bevy::pbr::Lightmap>()
             .single(&world)
