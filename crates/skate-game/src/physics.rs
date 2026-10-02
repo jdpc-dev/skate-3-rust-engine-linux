@@ -558,6 +558,10 @@ impl GamePhysics {
 mod tests;
 
 #[cfg(test)]
+#[path = "tests/determinism.rs"]
+mod determinism_tests;
+
+#[cfg(test)]
 #[path = "tests/air_playback.rs"]
 mod air_tests;
 
