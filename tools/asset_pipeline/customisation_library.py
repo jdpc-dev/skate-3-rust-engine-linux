@@ -8,6 +8,14 @@ from tools.asset_pipeline.customisation_catalog import write_private
 from tools.owned_game.big import BigArchive
 from tools.asset_pipeline.optional_content import CONTENT_ERRORS
 
+# Retail authored these shipped materials without `cas.IsColourizable`, so the
+# customiser hides its clothing colours for them. Expose the native palette for
+# these specific items; every other item still follows the extracted flag.
+COLOURIZABLE_ITEMS = {
+    '00000c6803e38817',                    # Cargo Shorts 1
+    '2c7f38170017232c', '2c7f38170017232d',  # Thunder Shoes (New / Worn)
+}
+
 def friendly(name):
     text=name.lower().replace('_',' ')
     replacements=[('shortsleeve','short sleeve'),('longsleeve','long sleeve'),('tshirt','tee'),
@@ -60,72 +68,6 @@ def prune_unavailable(models, materials, errors):
             model['materials'] = model['groups'][0]
 
 
-TEXTURE_PATH='data/content/createacharacter/texture/0x{}.rx2'
-
-def requested_textures(catalog):
-    """Texture ids prepare() decodes into decoded/, with its skips: no Misc
-    models, LOD 0, each material once, 'diffuse' required. Error paths can make
-    prepare() request fewer; prepare() removes warmed files it did not use."""
-    seen=set();tids=[]
-    for part in catalog['components']:
-        if part['slot']=='Misc':continue
-        for model in part['models']:
-            lod=next((l for l in model['lods'] if l['index']==0),None)
-            if lod is None:continue
-            for v in (v for group in lod['material_instances'] for v in group):
-                mat=catalog['materials'].get(v['id'])
-                if v['id'] in seen or mat is None:continue
-                tex={t['channel']:t['id'] for t in mat['textures']}
-                if 'diffuse' not in tex:continue
-                seen.add(v['id'])
-                tids+=[tex[c] for c in ('diffuse','alpha','normal','specular') if c in tex]
-    misc=next((p for p in catalog['components'] if p['slot']=='Misc'),None)
-    for m in (misc or {}).get('models',[]):
-        for v in (v for lod in m.get('lods',[]) for group in lod.get('material_instances',[]) for v in group):
-            mat=catalog['materials'].get(v['id'])
-            if mat and mat['flags'].get('cas.TattooCategory'):
-                tex={t['channel']:t['id'] for t in mat['textures']}
-                if 'decal' in tex:tids.append(tex['decal'])
-    return list(dict.fromkeys(tids))
-
-def warm_textures(config,tids):
-    """Worker body (customisation_workers.py): decode textures into decoded/
-    exactly as prepare()'s texture() does. Failures are left for prepare()."""
-    from tools.extract_default_skater import import_rx2_parser,decode_texture
-    cache=Path(config['directory']);archive=BigArchive(Path(config['game_root'])/'data/content/createacharacter.big')
-    entries={e.path.lower():e for e in archive.entries}
-    parser=import_rx2_parser(ROOT/'tools/vendor/utt');decoded=cache/'decoded';decoded.mkdir(exist_ok=True)
-    for tid in tids:
-        src=decoded/(tid+'.png')
-        if src.exists():continue
-        path=TEXTURE_PATH.format(tid);dest=cache/'source'/path
-        temporary=decoded/(tid+'.warm.png')
-        try:
-            if not dest.exists():write_private(dest,archive.read(entries[path.lower()]))
-            decode_texture(parser,dest,temporary);temporary.replace(src)
-        except CONTENT_ERRORS:
-            temporary.unlink(missing_ok=True)
-
-def warm_up(config,workers):
-    """Decode the requested textures in parallel processes.
-
-    Returns (warmed ids, ids whose source file the warm-up created) so that
-    prepare() can remove exactly what a serial run would not have produced."""
-    cache=Path(config['directory'])
-    tids=[t for t in requested_textures(json.loads((cache/'catalog.json').read_text())) if not (cache/'decoded'/(t+'.png')).exists()]
-    if workers<2 or len(tids)<2:return set(),set()
-    fresh={t for t in tids if not (cache/'source'/TEXTURE_PATH.format(t)).exists()}
-    import tempfile
-    from tools.asset_pipeline.customisation_workers import run_parallel
-    with tempfile.TemporaryDirectory(prefix='customiser-warm-') as tmp:
-        requests=[]
-        for index in range(workers):
-            request=Path(tmp)/f'{index}.json'
-            request.write_text(json.dumps(dict(config=config,textures=tids[index::workers])))
-            requests.append(['--warm-textures',request])
-        run_parallel(requests,workers)  # a failed worker only leaves work for prepare()
-    return set(tids),fresh
-
 def prepare(config):
     from tools.extract_default_skater import import_rx2_parser,decode_texture,parse_fallback_recipe
     from tools.asset_pipeline.retail_character import RX2,decode_dense_morphs,AnimSource,SkeletonSet
@@ -138,9 +80,7 @@ def prepare(config):
         if not dest.exists():write_private(dest,archive.read(entries[path.lower()]))
         return dest
     parser=import_rx2_parser(ROOT/'tools/vendor/utt');decoded=cache/'decoded';decoded.mkdir(exist_ok=True)
-    warmed,fresh_sources=warm_up(config,config.get('workers',1));used=set()
     def texture(tid,kind='raw'):
-        used.add(tid)
         src=decoded/(tid+'.png')
         if not src.exists():decode_texture(parser,extract('data/content/createacharacter/texture/0x'+tid+'.rx2'),src)
         if kind=='raw':return src.relative_to(assets).as_posix()
@@ -231,10 +171,9 @@ def prepare(config):
                 bounds=[float(v) for v in mat['flags']['cas.StampBorderConstraint'].split(',')])
         except CONTENT_ERRORS as error:
             errors.append(dict(tattoo=variant.get('id'),error=str(error)))
-    # Warm-up must not add receipted files a serial run would not have made.
-    for tid in warmed-used:
-        (decoded/(tid+'.png')).unlink(missing_ok=True)
-        if tid in fresh_sources:(cache/'source'/TEXTURE_PATH.format(tid)).unlink(missing_ok=True)
+    for mid in COLOURIZABLE_ITEMS:
+        if mid in mat_data:
+            mat_data[mid]['flags']['IsColourizable']='true'
     prune_unavailable(model_data,mat_data,errors)
     male=default_profile();male['gender']='male'
     female=copy.deepcopy(male);female['gender']='female';female['selections']={}
