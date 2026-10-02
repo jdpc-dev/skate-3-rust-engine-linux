@@ -11,6 +11,14 @@ pub(in crate::player::offboard) const RADIANS: f32 = f32::from_bits(0x3c8e_fa35)
 pub(in crate::player::offboard) fn select(test: f32, positive: f32, negative: f32) -> f32 {
     if test >= 0.0 { positive } else { negative }
 }
+pub(in crate::player::offboard) fn finite_or(v: Vector, fallback: Vector) -> Vector {
+    if v.iter().all(|x| x.is_finite()) {
+        v
+    } else {
+        fallback
+    }
+}
+
 pub(in crate::player::offboard) fn flatten(mut v: Vector) -> Vector {
     v[1] = 0.0;
     v
