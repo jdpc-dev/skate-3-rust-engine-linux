@@ -22,7 +22,7 @@ pub fn validate_package(source: &Path) -> Result<Manifest, String> {
     let manifest: Manifest = serde_json::from_slice(&read_bounded(&root, "mod.json", 64 * 1024)?)
         .map_err(|e| e.to_string())?;
     manifest.validate()?;
-    fingerprint(&root)?;
+    fingerprint(&root, &mut BTreeMap::new())?;
     let source = read_bounded(&root, &manifest.entry, 256 * 1024)?;
     let source = std::str::from_utf8(&source).map_err(|e| e.to_string())?;
     if source.starts_with('\u{1b}') { return Err("Lua bytecode is unsupported".into()); }
@@ -66,6 +66,9 @@ pub struct Manager {
     pub snapshot: Value,
     invalid_since: BTreeMap<String, Instant>,
     archives: archive::Cache,
+    /// Cached per-file digests so unchanged package files are not re-read on
+    /// every rescan.
+    fingerprint_cache: BTreeMap<PathBuf, BTreeMap<PathBuf, FileCache>>,
 }
 impl Manager {
     pub fn root(&self) -> &Path {
@@ -94,6 +97,7 @@ impl Manager {
             snapshot: Value::Null,
             invalid_since: BTreeMap::new(),
             archives: archive::Cache::default(),
+            fingerprint_cache: BTreeMap::new(),
         }
     }
     pub fn scan(&mut self, force: bool) {
@@ -145,7 +149,7 @@ impl Manager {
                 let manifest: Manifest =
                     serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 manifest.validate()?;
-                let hash = fingerprint(&path)?;
+                let hash = fingerprint(&path, &mut self.fingerprint_cache)?;
                 Ok::<_, String>((manifest, hash))
             })();
             match result {
@@ -406,7 +410,29 @@ impl Manager {
         Ok(())
     }
 }
-fn fingerprint(root: &Path) -> Result<u64, String> {
+/// One file's cached digest contribution, keyed by its absolute path.
+struct FileCache {
+    mtime: Option<std::time::SystemTime>,
+    size: u64,
+    digest: u64,
+}
+
+/// Content fingerprint of a package tree.
+///
+/// The walk itself, and every symlink, escape and size limit check it makes, runs
+/// on every call, so those security properties are unaffected by the cache. Only
+/// the per-file read-and-hash is skipped, and only when the file's mtime and size
+/// are both unchanged. Pruning is implicit: the fresh map replaces the old one
+/// each call, so deleted files cannot accumulate.
+///
+/// Known limit: a file edited without changing its length or its mtime is not
+/// noticed until the next process start. That is the usual trade for an
+/// mtime-keyed cache and needs a deliberate timestamp restore to hit; every
+/// ordinary edit, rebuild or re-download updates the mtime.
+fn fingerprint(
+    root: &Path,
+    cache: &mut BTreeMap<PathBuf, BTreeMap<PathBuf, FileCache>>,
+) -> Result<u64, String> {
     use std::hash::{Hash, Hasher};
     fn visit(
         root: &Path,
@@ -414,6 +440,8 @@ fn fingerprint(root: &Path) -> Result<u64, String> {
         h: &mut std::collections::hash_map::DefaultHasher,
         count: &mut usize,
         bytes: &mut u64,
+        previous: &BTreeMap<PathBuf, FileCache>,
+        fresh: &mut BTreeMap<PathBuf, FileCache>,
     ) -> Result<(), String> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| e.to_string())?
@@ -438,22 +466,42 @@ fn fingerprint(root: &Path) -> Result<u64, String> {
                 return Err("Asset escapes mod root".into());
             }
             if p.is_dir() {
-                visit(root, &p, h, count, bytes)?;
+                visit(root, &p, h, count, bytes, previous, fresh)?;
             } else {
                 let m = p.metadata().map_err(|e| e.to_string())?;
                 *bytes += m.len();
                 if *bytes > 64 * 1024 * 1024 {
                     return Err("Package exceeds 64 MiB".into());
                 }
-                p.strip_prefix(root).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/").hash(h);
-                std::fs::read(&p).map_err(|e| e.to_string())?.hash(h);
+                let mtime = m.modified().ok();
+                let digest = match previous.get(&p) {
+                    Some(c) if c.mtime == mtime && c.size == m.len() => c.digest,
+                    _ => {
+                        // Hash the relative name and the contents together, so a
+                        // digest depends on both, then cache just this file.
+                        let mut fh = std::collections::hash_map::DefaultHasher::new();
+                        p.strip_prefix(root)
+                            .map_err(|e| e.to_string())?
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                            .hash(&mut fh);
+                        std::fs::read(&p).map_err(|e| e.to_string())?.hash(&mut fh);
+                        let digest = fh.finish();
+                        fresh.insert(p.clone(), FileCache { mtime, size: m.len(), digest });
+                        digest
+                    }
+                };
+                digest.hash(h);
             }
         }
         Ok(())
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let previous = cache.remove(&root).unwrap_or_default();
+    let mut fresh = BTreeMap::new();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    visit(&root, &root, &mut h, &mut 0, &mut 0)?;
+    visit(&root, &root, &mut h, &mut 0, &mut 0, &previous, &mut fresh)?;
+    cache.insert(root, fresh);
     Ok(h.finish())
 }
 pub fn read_bounded(root: &Path, relative: &str, limit: u64) -> Result<Vec<u8>, String> {
