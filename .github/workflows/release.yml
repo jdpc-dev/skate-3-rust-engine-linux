@@ -8,6 +8,33 @@ on:
 permissions:
   contents: read
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: tests-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-tests
+          cache-on-failure: true
+      # Bevy/winit link against these; without them the test binary cannot be
+      # linked even though the suite never opens a window.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libudev-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev
+      # The asset-backed tests are #[ignore]d and stay skipped here; this is the
+      # gate that catches ordinary regressions in the 1142 that do not need the
+      # user's converted retail assets.
+      - name: Run workspace tests
+        run: cargo test --workspace --no-fail-fast
   windows:
     if: github.event_name != 'release' || github.event.release.tag_name != 'experimental'
     runs-on: windows-2025
