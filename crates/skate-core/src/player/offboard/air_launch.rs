@@ -86,14 +86,14 @@ pub fn produce(
             None
         };
     let forward = normalize_or(flatten(p.forward_224), ZERO);
-    packet.up_48 = p.up_544;
-    packet.forward_64 = forward;
+    packet.up_48 = finite_or(p.up_544, UP);
+    packet.forward_64 = finite_or(forward, [0.0, 0.0, 1.0, 0.0]);
     packet.scalar_96 = f32::from_bits(0x3db2_b8c2);
     packet.scalar_100 = f32::from_bits(0x3f5f_66f3);
     packet.scalar_104 = f32::from_bits(0x3f32_b8c2);
     packet.kind_108 = 1;
     packet.kind_112 = 0;
-    packet.position_32 = p.position_592;
+    packet.position_32 = finite_or(p.position_592, [0.0, 0.0, 0.0, 1.0]);
     let mut velocity = p.velocity_608;
     let mut secondary = velocity;
     match selected_mode {
@@ -145,7 +145,11 @@ pub fn produce(
         2 | 6 => {}
         _ => unreachable!("mode returns only the seven native cases"),
     }
-    packet.velocity_0 = velocity;
-    packet.secondary_velocity_16 = secondary;
+    packet.velocity_0 = finite_or(velocity, ZERO);
+    packet.secondary_velocity_16 = finite_or(secondary, ZERO);
+    packet.up_48 = finite_or(packet.up_48, UP);
+    packet.forward_64 = finite_or(packet.forward_64, [0.0, 0.0, 1.0, 0.0]);
+    packet.position_32 = finite_or(packet.position_32, [0.0, 0.0, 0.0, 1.0]);
+    packet.board_position_80 = finite_or(packet.board_position_80, packet.position_32);
     Ok(())
 }
