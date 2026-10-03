@@ -51,6 +51,20 @@ impl Default for ControllerInput {
     }
 }
 
+/// One frame of Object Dropper controller intent. Slots follow `xbox`: D-pad
+/// 0-3, LB 8, A 12, B 13, X 14. Edges come from the native Pad publication.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct ObjectDropperActions {
+    pub open: bool,
+    pub confirm: bool,
+    pub cancel: bool,
+    pub delete: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
 impl ControllerInput {
     /// Original input.cfg: LB.held && DPadD.pressed / LB.held && DPadU.held.
     /// Use the same debounced native Pad publication as ordinary gameplay.
@@ -64,6 +78,28 @@ impl ControllerInput {
         let modifier = flags(8) & 0xff00 != 0;
         (modifier, modifier && flags(1) & 0xff00_0000 != 0,
             modifier && flags(0) & 0xff00 != 0)
+    }
+
+    /// LB+B opens the Object Dropper; D-pad/A/B/X drive its catalog and ghost.
+    pub(crate) fn object_dropper_actions(&self) -> ObjectDropperActions {
+        let Some(device) = self.status.iter().position(|s| *s == ControllerStatus::Ready) else {
+            return ObjectDropperActions::default();
+        };
+        let pad = &self.pads[device];
+        if pad.count() == 0 { return ObjectDropperActions::default(); }
+        let flags = |i: usize| pad.records().get(i).map_or(0, |r| r[1]);
+        let pressed = |i: usize| flags(i) & 0xff00_0000 != 0;
+        let held = |i: usize| flags(i) & 0xff00 != 0;
+        ObjectDropperActions {
+            open: held(8) && pressed(13),
+            confirm: pressed(12),
+            cancel: pressed(13),
+            delete: pressed(14),
+            up: pressed(0),
+            down: pressed(1),
+            left: pressed(2),
+            right: pressed(3),
+        }
     }
     pub(crate) fn raw_input(&self) -> RawInput {
         self.status.iter().position(|s| *s == ControllerStatus::Ready)

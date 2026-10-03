@@ -38,6 +38,7 @@ mod customiser;
 mod customiser_parts;
 mod customiser_material;
 mod custom_models;
+mod object_dropper;
 mod teleport_menu;
 mod render_capacity;
 mod retail_render;

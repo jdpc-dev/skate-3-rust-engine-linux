@@ -7,7 +7,7 @@ mod query_index;
 pub mod query_metadata;
 use crate::math::Vector3;
 use broadphase::{conservative_bounds, primitive_bounds};
-use query_metadata::{Bounds, QueryMetadata};
+use query_metadata::{Bounds, QueryMesh, QueryMetadata, QueryPool};
 
 use super::{
     board::BodyId,
@@ -177,6 +177,148 @@ impl BoardWorld {
         world.query_index = query_index::QueryIndex::new(&metadata.meshes);
         world.query_metadata = Some(metadata);
         Ok(world)
+    }
+
+    /// Append host static geometry as new canonical triangles. Existing order,
+    /// identity and packed surfaces are preserved; the new triangles take one
+    /// new ground query mesh with world-space identity transforms.
+    pub fn append_triangles(
+        &mut self,
+        triangles: Vec<WorldTriangle>,
+        packed_surfaces: Vec<u16>,
+    ) -> Result<std::ops::Range<usize>, &'static str> {
+        let start = self.triangles.len();
+        if triangles.is_empty() {
+            return if packed_surfaces.is_empty() {
+                Ok(start..start)
+            } else {
+                Err("Inserted surface count mismatch")
+            };
+        }
+        if packed_surfaces.len() != triangles.len() {
+            return Err("Inserted surface count mismatch");
+        }
+        let bounds = Bounds::from_points(
+            triangles.iter().flat_map(|t| t.triangle.vertices),
+        )
+        .ok_or("Invalid inserted geometry bounds")?;
+        for triangle in &triangles {
+            self.triangle_bounds.push(
+                Bounds::from_points(triangle.triangle.vertices).unwrap_or(Bounds {
+                    min: Vector3::new(
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                    ),
+                    max: Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+                }),
+            );
+        }
+        self.observe_extrema(&triangles, bounds);
+        let end = start + triangles.len();
+        let metadata = self
+            .query_metadata
+            .as_mut()
+            .ok_or("Canonical world has no authored query metadata")?;
+        metadata.packed_surfaces.extend(packed_surfaces);
+        metadata.meshes.push(QueryMesh {
+            triangle_range: start..end,
+            local_to_world: crate::physics::drive_frames::RetailAffineTransform::IDENTITY,
+            world_to_local: crate::physics::drive_frames::RetailAffineTransform::IDENTITY,
+            local_bounds: bounds,
+            matching_group: -1,
+            rejection_flags: 0,
+            geometry: 0,
+            pool: QueryPool::Ground,
+        });
+        self.triangles.extend(triangles);
+        self.query_index = query_index::QueryIndex::new(&metadata.meshes);
+        Ok(start..end)
+    }
+
+    /// Remove a canonical range previously returned by `append_triangles`.
+    /// Every query mesh contained in the range is dropped; base map meshes are
+    /// never partially cut because inserted geometry always owns whole meshes.
+    pub fn remove_triangles(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), &'static str> {
+        if range.start > range.end || range.end > self.triangles.len() {
+            return Err("Static geometry range outside canonical world");
+        }
+        if range.start == range.end {
+            return Ok(());
+        }
+        let removed = range.end - range.start;
+        self.triangles.drain(range.clone());
+        self.triangle_bounds.drain(range.clone());
+        {
+            let metadata = self
+                .query_metadata
+                .as_mut()
+                .ok_or("Canonical world has no authored query metadata")?;
+            metadata.packed_surfaces.drain(range.clone());
+            metadata.meshes.retain(|mesh| {
+                !(mesh.triangle_range.start >= range.start && mesh.triangle_range.end <= range.end)
+            });
+            for mesh in &mut metadata.meshes {
+                if mesh.triangle_range.start >= range.end {
+                    mesh.triangle_range = (mesh.triangle_range.start - removed)
+                        ..(mesh.triangle_range.end - removed);
+                }
+            }
+        }
+        self.recompute_extrema();
+        let meshes = &self
+            .query_metadata
+            .as_ref()
+            .ok_or("Canonical world has no authored query metadata")?
+            .meshes;
+        self.query_index = query_index::QueryIndex::new(meshes);
+        Ok(())
+    }
+
+    fn observe_extrema(&mut self, triangles: &[WorldTriangle], bounds: Bounds) {
+        for triangle in triangles {
+            let fatness = if triangle.triangle.fatness.is_finite()
+                && triangle.triangle.fatness >= 0.
+            {
+                triangle.triangle.fatness
+            } else {
+                f32::INFINITY
+            };
+            self.maximum_fatness = self.maximum_fatness.max(fatness);
+        }
+        let span = (bounds.max.x - bounds.min.x)
+            .max(bounds.max.y - bounds.min.y)
+            .max(bounds.max.z - bounds.min.z);
+        self.maximum_triangle_margin = self
+            .maximum_triangle_margin
+            .max(span * (2. * broadphase::THIN_MARGIN));
+    }
+
+    fn recompute_extrema(&mut self) {
+        self.maximum_fatness = self
+            .triangles
+            .iter()
+            .map(|t| {
+                if t.triangle.fatness.is_finite() && t.triangle.fatness >= 0. {
+                    t.triangle.fatness
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .fold(0., f32::max);
+        self.maximum_triangle_margin = self
+            .triangle_bounds
+            .iter()
+            .map(|b| {
+                let span = (b.max.x - b.min.x)
+                    .max(b.max.y - b.min.y)
+                    .max(b.max.z - b.min.z);
+                span * (2. * broadphase::THIN_MARGIN)
+            })
+            .fold(0., f32::max);
     }
 
     pub fn query_metadata(&self) -> Result<&QueryMetadata, &'static str> {

@@ -120,6 +120,11 @@ objects are not yet pushable, droppable or collidable. Their current materials
 use the existing PBR fallback, not the native dynamicobject lighting shader.
 No static district collision, gameplay or animation logic was changed.
 
+A separate host feature, the Object Dropper, can now instantiate authored DMO
+templates and add static contact geometry for them. It does not make the
+authored native-props supplement movable, and it does not change the initial
+placement path above. See [object-dropper.md](object-dropper.md).
+
 Validation: synthetic record, rotation/scale/normal and invalid-reference tests;
 original-data template resolution and placement-bound comparison; offline map
 readers and shader composition. Game/recomp was not launched. GPU execution,

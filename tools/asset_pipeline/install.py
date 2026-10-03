@@ -132,7 +132,7 @@ def convert_map(archive,work,maps,stage,game_exe,log,report):
     final=maps/(label+'.skate')
     write_map(manifest_path,final,collision,report,prepared_spawn=spawn.result(label))
     finished('write_map')
-    from .dynamic_props import export as write_props
+    from .dynamic_props import export as write_props, export_templates as write_templates
     caches=list((work/'dmo/cache').glob('DMO_*'))
     from .optional_content import CONTENT_ERRORS, note
     props=stage/'assets/private/native-props'/(label+'.skate')
@@ -146,6 +146,17 @@ def convert_map(archive,work,maps,stage,game_exe,log,report):
         placed,unresolved=0,0
     finished('props')
     report(f'{label}: placed {placed} authored DMO instances, {unresolved} unresolved templates')
+    dropper=stage/'assets/private/dropper-templates'/label
+    try:
+        if not caches:raise RuntimeError('Movable-object source catalog is unavailable')
+        dropped=write_templates(manifest_path,caches,dropper,catalog_path=work/'dmo/catalog.json',report=report)
+        (stage/'assets/private/dropper-templates'/(label+'-availability.json')).unlink(missing_ok=True)
+    except CONTENT_ERRORS as error:
+        if dropper.is_dir():remove_intermediate(dropper,stage)
+        note(stage/'assets/private/dropper-templates'/(label+'-availability.json'),label+' object dropper',error,report=report)
+        dropped=0
+    finished('dropper_templates')
+    report(f'{label}: {dropped} object-dropper templates')
     report('Checking converted map: '+label)
     run([game_exe,'--assets',stage/'assets','--map',final,'--check-assets'],log,report)
     finished('validate')

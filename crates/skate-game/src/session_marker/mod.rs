@@ -1,6 +1,6 @@
 //! Manual session markers. Automatic bail recovery owns a different checkpoint.
 mod effect;
-mod hud;
+pub(crate) mod hud;
 mod noise;
 mod state;
 mod validation;
@@ -75,6 +75,7 @@ fn suspend(
     map: Res<CurrentMap>,
     menu: Res<crate::graphics_menu::Menu>,
     replay: Res<crate::replay::Replay>,
+    dropper: Res<crate::object_dropper::Dropper>,
     time: Res<Time<Real>>,
 ) {
     if marker.generation != map.generation {
@@ -83,6 +84,14 @@ fn suspend(
             blocked_until_release: true,
             ..default()
         };
+    }
+    if dropper.open {
+        marker.hold.cancel();
+        marker.visible = false;
+        marker.progress = 0.;
+        marker.blocked_until_release = true;
+        marker.ui_time = 0.;
+        return;
     }
     if !crate::graphics_menu::gameplay_active(Some(menu)) || replay.active {
         marker.hold.cancel();
@@ -105,10 +114,11 @@ fn update(
     mut skater: ResMut<SkaterRuntime>,
     validation: Res<validation::Validation>,
     replay: Res<crate::replay::Replay>,
+    dropper: Res<crate::object_dropper::Dropper>,
     mut audio: MessageWriter<SessionMarkerAudio>,
 ) {
     if vehicles.occupied() {session.blocked_until_release = true;return;}
-    if replay.active {
+    if replay.active || dropper.open {
         return;
     }
     let (modifier, set, held) = input.session_marker_actions();

@@ -92,9 +92,12 @@ compositor uses shadow alpha `1-(1-a)^2.2` and panel opacity 0.75. These are
 constants or proof of native gamma equivalence. The shadow's original atlas
 footprint and RGB, foreground font, icon bytes and all geometry are preserved.
 Both source and output texture hashes are recorded in the private manifest.
-Object Dropper is shown as
-unavailable; its 0.3 opacity is a host presentation choice, not recovered
-ActionScript behavior. This change does not add Object Dropper functionality.
+Object Dropper's 0.3 opacity is the
+disabled baseline, not recovered ActionScript behavior. When a map has a
+prepared dropper-template catalog the host restores the row and runs a
+host-side placement feature; see [object-dropper.md](object-dropper.md). That
+feature is not native-parity and this section still does not claim recovered
+native Object Dropper behavior.
 
 Runtime accepts `SKATE3_SESSION_MARKER_OVERLAY`, falling back to
 `ASSET_ROOT/private/session-marker`. This is the narrow interface for a future

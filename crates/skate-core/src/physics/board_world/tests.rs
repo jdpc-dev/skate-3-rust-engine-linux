@@ -255,3 +255,42 @@ fn predictive_contacts_and_retention_match_full_scan_for_every_primitive() {
     }
     assert!(observed);
 }
+
+#[test]
+fn append_and_remove_static_geometry_preserve_base_world() {
+    let mut world = annotated(tiled());
+    let base = world.triangles().len();
+    let added = vec![face(20000., 7777, 0.05), face(20010., 7778, 0.)];
+    let range = world.append_triangles(added, vec![23, 24]).unwrap();
+    assert_eq!(range, base..base + 2);
+    assert_eq!(world.triangles().len(), base + 2);
+    {
+        let metadata = world.query_metadata().unwrap();
+        assert_eq!(metadata.packed_surfaces.len(), base + 2);
+        assert_eq!(metadata.packed_surfaces[base], 23);
+        assert_eq!(metadata.packed_surfaces[base + 1], 24);
+        let mesh = metadata.meshes.last().unwrap();
+        assert_eq!(mesh.triangle_range, base..base + 2);
+        assert_eq!(mesh.geometry, 0);
+        assert!(mesh.pool == QueryPool::Ground);
+    }
+    let bounds = Bounds::from_points([Vector3::new(20000., 0., 0.)])
+        .unwrap()
+        .expanded(30.);
+    assert!(world.candidate_ranges(Some(bounds)).contains(&(base..base + 2)));
+    world.remove_triangles(range).unwrap();
+    assert_eq!(world.triangles().len(), base);
+    let metadata = world.query_metadata().unwrap();
+    assert_eq!(metadata.packed_surfaces.len(), base);
+    assert_eq!(metadata.meshes.len(), base);
+    assert!(world.candidate_ranges(Some(bounds)).is_empty());
+    assert_eq!(world.candidate_ranges(None), vec![0..base]);
+}
+
+#[test]
+fn append_rejects_surface_count_mismatch_and_remove_bounds() {
+    let mut world = annotated(tiled());
+    assert!(world.append_triangles(vec![face(1., 1, 0.)], vec![]).is_err());
+    assert!(world.append_triangles(vec![], vec![7]).is_err());
+    assert!(world.remove_triangles(0..world.triangles().len() + 1).is_err());
+}
