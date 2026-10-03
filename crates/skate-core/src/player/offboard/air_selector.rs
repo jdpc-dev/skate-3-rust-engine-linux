@@ -178,14 +178,15 @@ pub fn request(mut trajectory: Trajectory, radius: f32) -> QueryRequest {
 }
 pub fn validate_request(q: QueryRequest) -> Result<(), &'static str> {
     let t = q.trajectory;
+    // Trajectory evaluation reads x,y,z only; the native padding lane may hold
+    // NaN from off-board animation sources and must not reject the request.
+    let finite_xyz = |v: &[f32; 4]| v[..3].iter().all(|x| x.is_finite());
     if [t.duration, q.radius, q.start_error, q.end_error]
         .iter()
         .any(|x| !x.is_finite() || *x <= 0.)
-        || t.position
-            .into_iter()
-            .chain(t.velocity)
-            .chain(t.acceleration)
-            .any(|x| !x.is_finite())
+        || !finite_xyz(&t.position)
+        || !finite_xyz(&t.velocity)
+        || !finite_xyz(&t.acceleration)
     {
         Err("Invalid native BipedAir trajectory request")
     } else {

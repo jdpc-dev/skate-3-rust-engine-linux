@@ -136,3 +136,35 @@ fn seventh_hit_height_and_first_hit_material_reach_consumed_flags() {
     hits[6] = Some(hit(v(0., -0.9, 0.)));
     assert!(!interpret_hits(&packet, hits).flag26);
 }
+#[test]
+fn single_sided_ledge_survives_a_centre_line_hit() {
+    // A lip whose near line is over the drop, the centre line grazes the deck
+    // and the far line is short must stay kind2 (flat ground never sets the
+    // ledge flag). The centre hit must not force the flat-ground kind3.
+    let packet = prepare_packet(
+        Frame::IDENTITY,
+        context(),
+        EdgeSelection {
+            edge: Edge {
+                start: v(0., 0., -1.),
+                end: v(0., 0., 1.),
+            },
+            closest: Vector3::ZERO,
+        },
+        0.25,
+    )
+    .unwrap();
+    let mut ledge = [None; 7];
+    ledge[1] = Some(hit(Vector3::ZERO));
+    ledge[3] = Some(hit(Vector3::ZERO));
+    ledge[4] = Some(hit(Vector3::ZERO));
+    assert_eq!(interpret_hits(&packet, ledge).kind, 2);
+    // Both near lines present is still ordinary ground even with the centre.
+    let mut flat = ledge;
+    flat[0] = Some(hit(Vector3::ZERO));
+    assert_eq!(interpret_hits(&packet, flat).kind, 3);
+    // Centre alone remains the near-field ground fallback.
+    let mut centre = [None; 7];
+    centre[4] = Some(hit(Vector3::ZERO));
+    assert_eq!(interpret_hits(&packet, centre).kind, 3);
+}

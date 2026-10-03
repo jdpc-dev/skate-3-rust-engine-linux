@@ -18,6 +18,10 @@ pub(super) fn prepare(
     {
         return Err("Invalid authored BipedAir selector settings");
     }
+    // The trajectory math only reads x,y,z; the native padding lane (w) may
+    // legitimately carry NaN from off-board animation/velocity sources and must
+    // not reject an otherwise finite launch.
+    let finite_xyz = |v: &Vector| v[..3].iter().all(|x| x.is_finite());
     if [p.scalar_96, p.scalar_100, p.scalar_104]
         .iter()
         .any(|x| !x.is_finite())
@@ -30,9 +34,8 @@ pub(super) fn prepare(
             p.board_position_80,
             gravity,
         ]
-        .into_iter()
-        .flatten()
-        .any(|x| !x.is_finite())
+        .iter()
+        .any(|v| !finite_xyz(v))
     {
         return Err("Nonfinite BipedAir launch packet");
     }

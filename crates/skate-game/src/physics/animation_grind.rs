@@ -14,9 +14,10 @@ pub(super) fn publish(
     height: f32,
     mirrored: bool,
     board_forward: [f32; 3],
+    offboard_drop_in: bool,
 ) -> Result<PhysicalStateInputs, String> {
     let (state, grind, conditions) =
-        observations(physical, filtered, height, mirrored, board_forward)?;
+        observations(physical, filtered, height, mirrored, board_forward, offboard_drop_in)?;
     host.grind_physical = Some(grind);
     host.grind_conditions = Some(conditions);
     Ok(state)
@@ -28,6 +29,7 @@ fn observations(
     height: f32,
     mirrored: bool,
     board_forward: [f32; 3],
+    offboard_drop_in: bool,
 ) -> Result<
     (
         PhysicalStateInputs,
@@ -70,7 +72,7 @@ fn observations(
         trick_out_240: physical.grinds.trick_out_240,
         air_grind_443: physical.air.flag_443 != 0,
         air_time_184: physical.air.scalar_184,
-        dropping_in_324: physical.grinds.dropping_in_324 != 0,
+        dropping_in_324: physical.grinds.dropping_in_324 != 0 || offboard_drop_in,
     };
     Ok((
         PhysicalStateInputs {

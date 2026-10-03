@@ -62,6 +62,7 @@ pub(super) fn advance(
     ))
     .map_err(|e| format!("Animation tick{}: {e}", physics.ticks))?;
     super::offboard_audit_trace::stage(tick, "animation", physics, skater, controls);
+    super::drop_in_trace::stage(tick, "animation", skater, controls, graphs);
     #[cfg(test)]
     super::offboard_root_trace::trace(tick, "animation", skater);
     //ForcePhysics Begin82BB2868 writes the live Skeleton16420 mode once.
@@ -127,6 +128,7 @@ pub(super) fn advance(
     }
     let state_after_selection = skater.player_state.current();
     super::offboard_audit_trace::stage(tick, "selected", physics, skater, controls);
+    super::drop_in_trace::stage(tick, "selected", skater, controls, graphs);
     #[cfg(test)]
     super::offboard_root_trace::trace(tick, "selected", skater);
     if state_before_selection != state_after_selection {
@@ -264,6 +266,7 @@ pub(super) fn advance(
         &skater.trajectory.selector,
     )?;
     player_state::publish(physics, skater)?;
+    super::drop_in_trace::stage(tick, "published", skater, controls, graphs);
     skater
         .grind_camera
         .condition_fields(&mut skater.player_input.physical.grinds);

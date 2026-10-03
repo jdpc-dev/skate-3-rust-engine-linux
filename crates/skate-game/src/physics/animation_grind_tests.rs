@@ -44,7 +44,7 @@ fn completed_output_fields_reach_both_graph_boundaries_without_proxies() {
         last_grind_distance: 0.0,
     };
     let (state, grind, conditions) =
-        observations(&p, Some(&filtered), 0.8, true, board_forward).unwrap();
+        observations(&p, Some(&filtered), 0.8, true, board_forward, false).unwrap();
     assert!(state.grinding);
     assert_eq!(encode(state.grind_name.as_bytes()), filtered.grind.name);
     assert_eq!(grind.grind_name, filtered.grind.name);
@@ -66,15 +66,20 @@ fn completed_output_fields_reach_both_graph_boundaries_without_proxies() {
     assert_eq!(p.state.state_16, 0);
     assert_eq!(p.grinds.flag_318, 0);
     assert_eq!(p.off_board.flag_304, 0);
-    assert!(observations(&p, None, 0.8, true, board_forward).is_err());
+    // The Mount drop-in flag satisfies IsDroppingIn without a grind contact.
+    p.grinds.dropping_in_324 = 0;
+    let (_, _, dropped_in) =
+        observations(&p, Some(&filtered), 0.8, true, board_forward, true).unwrap();
+    assert!(Condition::DroppingIn.evaluate(&dropped_in));
+    assert!(observations(&p, None, 0.8, true, board_forward, false).is_err());
     p.filtered_state_0 = FilteredCategory::Air as u32;
-    assert!(observations(&p, Some(&filtered), 0.8, true, board_forward).is_err());
+    assert!(observations(&p, Some(&filtered), 0.8, true, board_forward, false).is_err());
 }
 
 #[test]
 fn initial_reset_is_not_an_invented_grind_publication() {
     let (state, grind, _) =
-        observations(&PhysicalPlayerInput::default(), None, 0.0, false, [0.0; 3]).unwrap();
+        observations(&PhysicalPlayerInput::default(), None, 0.0, false, [0.0; 3], false).unwrap();
     assert!(!state.grinding && !grind.grinding);
     assert_eq!(state.category, 0);
     assert_eq!(state.grind_name, "");

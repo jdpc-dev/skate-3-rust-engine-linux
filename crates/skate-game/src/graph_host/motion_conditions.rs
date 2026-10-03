@@ -74,6 +74,15 @@ pub enum MotionCondition {
     /// Thin-ground branch of the stock BipedGround state.
     IsBipedGroundThin,
     IsHoldingSkateboard,
+    /// IsArmChannelPlaying82BAxxxx: true while any gesture/arm overlay channel
+    /// (the three CharacterGesture channels) still exists. Mount's drop-in
+    /// `TryToLeave` ends the gestures and waits for this to clear.
+    IsArmChannelPlaying,
+    /// IsDropInWithoutTransition: authored in Mount.OutOfDropIn to skip the
+    /// OnBoard.Grinding.DroppingIn ride. The native producer is unresolved; a
+    /// resolved false leaf keeps the canonical grind-drop-in transition rather
+    /// than aborting the graph on an unsupported condition.
+    IsDropInWithoutTransition,
     /// Static gameplay has no moving actors yet; the stock condition is a
     /// resolved physical flag and must remain false until a moving support is
     /// published by the collision owner.
@@ -184,6 +193,8 @@ impl MotionCondition {
             "GroundSlopeType" => Self::GroundSlopeType(super::motion_ground_slope::GroundSlopeType::parse(a)?),
             "IsBipedGroundThin" => Self::IsBipedGroundThin,
             "IsHoldingSkateboard" => Self::IsHoldingSkateboard,
+            "IsArmChannelPlaying" => Self::IsArmChannelPlaying,
+            "IsDropInWithoutTransition" => Self::IsDropInWithoutTransition,
             "IsStandingOnMovingObject" => Self::IsStandingOnMovingObject,
             "IsInDebugAnimationsMode" => Self::DebugAnimationsMode,
             name if super::motion_stock_conditions::Condition::recognizes(name) => {
@@ -256,6 +267,10 @@ impl MotionCondition {
                 .ok_or("IsBipedGroundThin requires the native ground geometry publication")?,
             Self::IsHoldingSkateboard => host.toggle_board_physical
                 .is_some_and(|p| p.holding_board),
+            Self::IsArmChannelPlaying => super::motion_character_gesture::CHANNELS
+                .iter()
+                .any(|name| host.animation.channels.has(name)),
+            Self::IsDropInWithoutTransition => false,
             Self::IsStandingOnMovingObject => host
                 .gameplay_conditions
                 .ok_or("IsStandingOnMovingObject requires the physical state publication")?

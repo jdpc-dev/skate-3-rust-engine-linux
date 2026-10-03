@@ -47,6 +47,9 @@ impl Owner {
                 frame[1][i].mul_add(point[1], frame[0][i].mul_add(point[0], frame[3][i])),
             )
         });
+        // An affine point transform is homogeneous 1. The host animation frame
+        // can retain a non-finite padding lane; never publish it as a position.
+        packet.position_32[3] = 1.0;
         Ok(Some(packet))
     }
 }
