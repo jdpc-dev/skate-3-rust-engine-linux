@@ -150,7 +150,7 @@ def compile_hud(cache_root: Path, output: Path, toolkit="vendor.skate3_ui") -> N
         "source_manifest_sha256": hashlib.sha256((cache_root/"manifest.json").read_bytes()).hexdigest(),
         "timelines": {"hudintro": [1,14], "hudoutro": [15,30], "maximized": [27,49], "3": [9,18]},
         "presentation": {"panel_opacity": PANEL_OPACITY, "shadow_coverage_gamma": SHADOW_COVERAGE_GAMMA},
-        "notes": "Authored three-row display list; native RenderButton dimensions and dual font passes. Panel opacity and shadow coverage compensate the host compositor against reference screenshots; they are not recovered native constants. Object Dropper is unavailable; its 0.3 opacity is a host presentation choice."}
+        "notes": "Authored three-row display list; native RenderButton dimensions and dual font passes. Panel opacity and shadow coverage compensate the host compositor against reference screenshots; they are not recovered native constants. Object Dropper's 0.3 opacity is the disabled baseline; the host restores the row when a dropper-template catalog is installed."}
     (output/"hud.json").write_text(json.dumps(manifest, indent=2)+"\n")
 
 

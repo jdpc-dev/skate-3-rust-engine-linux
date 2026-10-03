@@ -171,6 +171,145 @@ def load_catalog(path):
     return data['templates'], data['textures']
 
 
+# Object Dropper catalog classification. First matching token wins; more
+# specific tokens precede broader ones. This is a host presentation mapping of
+# authored DMO model names, not a recovered park-item category assignment.
+DROPPER_RULES = (
+    ('quarterpipe', 'Ramp', 'Quarter Pipe'),
+    ('guardrailgrind', 'Rail', 'Grind Rail'),
+    ('railfancymed', 'Rail', 'Fancy Rail'),
+    ('raillong_flatlow', 'Rail', 'Long Rail (Low)'),
+    ('raillong_flatmed', 'Rail', 'Long Rail (Med)'),
+    ('safetybarrierlong', 'Barrier', 'Safety Barrier'),
+    ('barrierplastic', 'Barrier', 'Plastic Barrier'),
+    ('barriertraffic', 'Barrier', 'Traffic Barrier'),
+    ('constructionsignstand', 'Barrier', 'Construction Sign'),
+    ('picnictable', 'Bench', 'Picnic Table'),
+    ('pinnictable', 'Bench', 'Picnic Table'),
+    ('patiotable', 'Bench', 'Patio Table'),
+    ('patiochair', 'Bench', 'Patio Chair'),
+    ('bench', 'Bench', 'Bench'),
+    ('couch', 'Bench', 'Couch'),
+    ('garbagecan', 'Bin', 'Garbage Can'),
+    ('recyclingbin', 'Bin', 'Recycling Bin'),
+    ('recyclebin', 'Bin', 'Recycle Bin'),
+    ('tintrashbody', 'Bin', 'Trash Can'),
+    ('garbagebag', 'Bin', 'Garbage Bag'),
+    ('dumpsteropen', 'Bin', 'Dumpster (Open)'),
+    ('dumpsterclosed', 'Bin', 'Dumpster (Closed)'),
+    ('newspaperbox', 'Misc', 'Newspaper Box'),
+    ('newspaper', 'Misc', 'Newspaper Dispenser'),
+    ('mailbox', 'Misc', 'Mail Box'),
+    ('vendingmachine', 'Misc', 'Vending Machine'),
+    ('bikerack', 'Misc', 'Bike Rack'),
+    ('woodenpalette', 'Misc', 'Wooden Palette'),
+    ('beachball', 'Misc', 'Beach Ball'),
+    ('basketballstantion', 'Misc', 'Basketball Hoop'),
+    ('basketball', 'Misc', 'Basketball'),
+    ('soccernet', 'Misc', 'Soccer Net'),
+    ('hurdleshort', 'Misc', 'Hurdle (Short)'),
+    ('hurdletall', 'Misc', 'Hurdle (Tall)'),
+)
+# Ground features and fragments that are not standalone placeable props.
+DROPPER_EXCLUDE = ('crackedground', 'tintrashlid')
+DROPPER_CATEGORY_ORDER = ('Ramp', 'Rail', 'Barrier', 'Bench', 'Bin', 'Misc')
+
+
+def classify_prop(name):
+    low = name.lower()
+    if any(token in low for token in DROPPER_EXCLUDE):
+        return None
+    for token, category, label in DROPPER_RULES:
+        if token in low:
+            return category, label
+    return None
+
+
+def _used_templates(manifest_path, templates):
+    """template_id -> first authored locator name that references it."""
+    district = json.loads(manifest_path.read_text())
+    used = {}
+    for source in district['simulation_assets']:
+        raw = (manifest_path.parent / source['rx2']).read_bytes()
+        for item in locators(raw):
+            key = item['template_id']
+            if key in templates and key not in used:
+                used[key] = item['name']
+    return district, used
+
+
+def export_templates(manifest_path, cache_roots, output_dir, *, catalog_path=None, report=print):
+    """Emit one model-local, base-centred render-only .skate per droppable prop.
+
+    The runtime reuses the normal map parser and material binding. Geometry is
+    baked from the same authored DMO catalog as the native-props supplement; no
+    new models, collision or behaviour are invented here.
+    """
+    templates, textures = catalog(cache_roots) if catalog_path is None else load_catalog(catalog_path)
+    district, referenced = _used_templates(manifest_path, templates)
+    selected = []
+    for template_id, name in referenced.items():
+        classified = classify_prop(name)
+        if classified is not None:
+            selected.append((classified[0], classified[1], template_id))
+    selected.sort(key=lambda row: (DROPPER_CATEGORY_ORDER.index(row[0]), row[1], row[2]))
+    # Disambiguate repeated display labels deterministically.
+    counts = {}
+    entries = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='skate-dropper-') as work:
+        root = Path(work)
+        for category, label, template_id in selected:
+            counts[label] = counts.get(label, 0) + 1
+            if counts[label] > 1:
+                label = f'{label} ({counts[label]})'
+            template = templates[template_id]
+            transform = template['model_matrix'] @ template['matrix']
+            arrays = {}
+            meshes = copy.deepcopy(template['meshes'])
+            used_textures = set()
+            with np.load(template['npz'], allow_pickle=False) as original:
+                for mesh in meshes:
+                    arrays.update(transform_mesh(original, mesh['index'], transform))
+                    used_textures.update(mesh.get('retail_texture_ids', {}).values())
+                    if mesh.get('texture_id'):
+                        used_textures.add(mesh['texture_id'])
+            vertex_keys = [key for key in arrays if key.startswith('vertices_')]
+            if not vertex_keys:
+                raise ValueError('DMO template has no geometry: ' + template_id)
+            combined = np.concatenate([arrays[key] for key in vertex_keys], axis=0)
+            low, high = combined.min(axis=0), combined.max(axis=0)
+            offset = np.array([-(low[0] + high[0]) / 2, -low[1], -(low[2] + high[2]) / 2], dtype='f4')
+            for key in vertex_keys:
+                arrays[key] = (arrays[key] + offset).astype('f4')
+            model_npz = root / (template_id + '.npz')
+            np.savez(model_npz, **arrays)
+            missing = used_textures - set(textures)
+            if missing:
+                raise ValueError('Missing DMO textures ' + ', '.join(sorted(missing)))
+            manifest = dict(map_name=district['map_name'], district_name=district['district_name'],
+                            models=[dict(asset_id=template_id, meshes=meshes, npz=str(model_npz))],
+                            textures={key: textures[key] for key in sorted(used_textures)},
+                            normal_texture_policy=dict(excluded_texture_ids=[]), grind_splines=[])
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            name = template_id + '.skate'
+            temporary = output_dir / (name + '.new')
+            try:
+                write(root / 'manifest.json', temporary, None, render_only=True)
+                temporary.replace(output_dir / name)
+            finally:
+                temporary.unlink(missing_ok=True)
+            bounds = [(low + offset).tolist(), (high + offset).tolist()]
+            entries.append(dict(id=template_id, name=label, category=category, file=name,
+                                bounds=bounds, meshes=len(meshes)))
+            report(f'Object dropper template: {category} / {label} ({template_id})')
+    catalog_file = output_dir / 'catalog.json'
+    temporary = catalog_file.with_suffix('.new')
+    temporary.write_text(json.dumps(dict(version=1, map=district['map_name'], templates=entries), indent=2) + '\n')
+    temporary.replace(catalog_file)
+    return len(entries)
+
+
 def export(manifest_path, cache_roots, output, *, catalog_path=None):
     district = json.loads(manifest_path.read_text())
     templates, textures = catalog(cache_roots) if catalog_path is None else load_catalog(catalog_path)

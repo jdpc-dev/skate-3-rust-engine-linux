@@ -1,8 +1,6 @@
 //! Persistent platform-input owner. Device collection runs on host frames;
 //! this does not choose the skater simulation clock or advance Derived input.
-use super::controller_kind::ControllerKind;
 use super::platform::{DeviceError, DevicePacket};
-use std::sync::Arc;
 use bevy::prelude::Resource;
 use skate_core::input::{
     controller::ActionMap,
@@ -29,8 +27,6 @@ pub(crate) struct ControllerInput {
     pads: [Pad; DEVICE_SLOTS],
     pub status: [ControllerStatus; DEVICE_SLOTS],
     pub packet_numbers: [Option<u32>; DEVICE_SLOTS],
-    /// Identity of each slot's controller (None while unavailable).
-    pub kinds: [Option<Arc<ControllerKind>>; DEVICE_SLOTS],
     pub mapped_actions: [[f32; 18]; DEVICE_SLOTS],
     pub publications: u64,
     pub consumed_batches: u64,
@@ -47,13 +43,26 @@ impl Default for ControllerInput {
             pads: std::array::from_fn(|_| Pad::new()),
             status: [ControllerStatus::Unpolled; DEVICE_SLOTS],
             packet_numbers: [None; DEVICE_SLOTS],
-            kinds: Default::default(),
             mapped_actions: [[0.0; 18]; DEVICE_SLOTS],
             publications: 0,
             consumed_batches: 0,
             tick: 0,
         }
     }
+}
+
+/// One frame of Object Dropper controller intent. Slots follow `xbox`: D-pad
+/// 0-3, LB 8, A 12, B 13, X 14. Edges come from the native Pad publication.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct ObjectDropperActions {
+    pub open: bool,
+    pub confirm: bool,
+    pub cancel: bool,
+    pub delete: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
 }
 
 impl ControllerInput {
@@ -70,12 +79,27 @@ impl ControllerInput {
         (modifier, modifier && flags(1) & 0xff00_0000 != 0,
             modifier && flags(0) & 0xff00 != 0)
     }
-    /// The slot gameplay reads: the first ready one.
-    pub(crate) fn active_slot(&self) -> Option<usize> {
-        self.status.iter().position(|s| *s == ControllerStatus::Ready)
-    }
-    pub(crate) fn kind(&self, slot: usize) -> Option<&ControllerKind> {
-        self.kinds.get(slot)?.as_deref()
+
+    /// LB+B opens the Object Dropper; D-pad/A/B/X drive its catalog and ghost.
+    pub(crate) fn object_dropper_actions(&self) -> ObjectDropperActions {
+        let Some(device) = self.status.iter().position(|s| *s == ControllerStatus::Ready) else {
+            return ObjectDropperActions::default();
+        };
+        let pad = &self.pads[device];
+        if pad.count() == 0 { return ObjectDropperActions::default(); }
+        let flags = |i: usize| pad.records().get(i).map_or(0, |r| r[1]);
+        let pressed = |i: usize| flags(i) & 0xff00_0000 != 0;
+        let held = |i: usize| flags(i) & 0xff00 != 0;
+        ObjectDropperActions {
+            open: held(8) && pressed(13),
+            confirm: pressed(12),
+            cancel: pressed(13),
+            delete: pressed(14),
+            up: pressed(0),
+            down: pressed(1),
+            left: pressed(2),
+            right: pressed(3),
+        }
     }
     pub(crate) fn raw_input(&self) -> RawInput {
         self.status.iter().position(|s| *s == ControllerStatus::Ready)
@@ -88,7 +112,6 @@ impl ControllerInput {
         self.pads = std::array::from_fn(|_| Pad::new());
         self.mapped_actions = [[0.0; 18]; DEVICE_SLOTS];
     }
-    #[cfg(test)]
     pub(crate) fn player_actions(&self) -> GameplayActions {
         let device = self.status.iter().position(|status| *status == ControllerStatus::Ready).unwrap_or(0);
         GameplayActions::from_pad(&self.pads[device])
@@ -127,14 +150,12 @@ impl ControllerInput {
                     let values = xbox::convert(&packet.state, u8::from(packet.subtype == 7));
                     self.cache[next][device] = HistoryRecord::new(&values);
                     self.packet_numbers[device] = Some(packet.number);
-                    self.kinds[device] = packet.kind;
                     self.status[device] = ControllerStatus::Ready;
                 }
                 Err(error) => {
                     self.raw[device] = RawInput::default();
                     self.cache[next][device].clear_count();
                     self.packet_numbers[device] = None;
-                    self.kinds[device] = None;
                     self.status[device] = ControllerStatus::Unavailable(error);
                 }
             }

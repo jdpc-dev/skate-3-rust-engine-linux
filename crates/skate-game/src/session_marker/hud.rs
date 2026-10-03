@@ -27,6 +27,10 @@ struct Primitive {
     texture: Option<usize>,
     color: [f32; 4],
     vertices: Vec<Vertex>,
+    /// Authored row identity (`return`, `place`, `dropper`). The extractor has
+    /// always written this; older manifests simply omit it.
+    #[serde(default)]
+    role: Option<String>,
 }
 #[derive(Deserialize)]
 struct Vertex {
@@ -36,8 +40,16 @@ struct Vertex {
 #[derive(Component)]
 struct MarkerHudRoot;
 
-pub(super) fn install(app: &mut App) {
-    app.add_systems(Startup, load).add_systems(Update, present);
+/// Dropper-row material handles plus their authored colors. The extractor bakes
+/// the unavailable row at 0.3 alpha; the host restores the row when the map has
+/// an Object Dropper catalog.
+#[derive(Resource, Default)]
+pub(crate) struct DropperHud(pub(crate) Vec<(Handle<ColorMaterial>, [f32; 4])>);
+
+pub(crate) fn install(app: &mut App) {
+    app.init_resource::<DropperHud>()
+        .add_systems(Startup, load)
+        .add_systems(Update, present);
 }
 
 pub(super) fn overlay_path(root: &Path) -> PathBuf {
@@ -124,6 +136,7 @@ fn load(
         return;
     }
     info!("Original session-marker HUD loaded from {}", folder.display());
+    let mut dropper = Vec::new();
     commands
         .spawn((MarkerHudRoot, Transform::default(), Visibility::Hidden))
         .with_children(|parent| {
@@ -150,14 +163,19 @@ fn load(
                     texture: primitive.texture.map(|i| textures[i].clone()),
                     ..default()
                 };
+                let material = materials.add(material);
+                if primitive.role.as_deref() == Some("dropper") {
+                    dropper.push((material.clone(), primitive.color));
+                }
                 parent.spawn((
                     Mesh2d(meshes.add(mesh)),
-                    MeshMaterial2d(materials.add(material)),
+                    MeshMaterial2d(material),
                     layer.clone(),
                     Transform::from_xyz(0., 0., order as f32 * 0.01),
                 ));
             }
         });
+    commands.insert_resource(DropperHud(dropper));
 }
 
 fn present(

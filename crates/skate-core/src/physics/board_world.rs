@@ -7,8 +7,7 @@ mod query_index;
 pub mod query_metadata;
 use crate::math::Vector3;
 use broadphase::{conservative_bounds, primitive_bounds};
-pub use broadphase::{VOLUME_QUERY_SCALE, VOLUME_QUERY_STEP, VolumeMotion, volume_query_bounds};
-use query_metadata::{Bounds, QueryMetadata};
+use query_metadata::{Bounds, QueryMesh, QueryMetadata, QueryPool};
 
 use super::{
     board::BodyId,
@@ -22,18 +21,6 @@ use super::{
         triangle_from_volume,
     },
 };
-
-/// Retail surface type 12 (`(tag >> 7) & 31`): water.
-pub const fn is_water_tag(tag: u32) -> bool {
-    tag & 0xF80 == 0x600
-}
-
-/// Water with geometry within this depth under the surface (at a given point)
-/// is shallow: solid there, like retail's University fountain channel, where
-/// the bailed skater lies on the water. Deeper water is not solid: bodies sink
-/// in and float (Aletown canal). Project-chosen depth
-/// (docs/hails-additions/09-water.md).
-pub const FLOAT_DEPTH: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug)]
 pub struct WorldTriangle {
@@ -108,41 +95,21 @@ pub struct WheelWorldSettings {
 /// One enabled moving primitive, with its owning solver body and material.
 #[derive(Clone, Copy, Debug)]
 pub struct BoardWorldVolume {
-    /// Native serialized VolumeData+212 (Part+92), not Volume+84.
-    pub collision_group: u32,
     pub body: CollisionBody,
     pub primitive: ContactPrimitive,
-    /// Owning body's rates; 82777E70 sweeps the query box over them.
-    pub motion: VolumeMotion,
+    pub linear_velocity: Vector3,
     pub material: RetailContactMaterial,
-}
-
-/// Host-supplied moving geometry. The core remains independent of Rapier and
-/// queries the same solid shapes as the host's rigid-body contact bridge.
-#[derive(Clone, Copy, Debug)]
-pub struct ExternalLineHit {
-    pub hit: WorldLineHit,
-    pub surface: u16,
-    pub geometry_id: u32,
-    pub frame: [[f32; 4]; 4],
-}
-pub trait ExternalQueries: Send + Sync {
-    fn line(&self, start: Vector3, end: Vector3, radius: f32) -> Option<ExternalLineHit>;
-    fn nearby(&self, center: Vector3, radius: f32) -> Vec<[Vector3; 3]>;
 }
 
 /// World geometry remains in supplied order. Each query reuses output storage;
 /// the returned contacts are valid until the next mutable call.
 pub struct BoardWorld {
     triangles: Vec<WorldTriangle>,
-    external: Option<std::sync::Arc<dyn ExternalQueries>>,
     triangle_bounds: Vec<Bounds>,
     query_metadata: Option<QueryMetadata>,
     query_index: query_index::QueryIndex,
     maximum_fatness: f32,
     maximum_triangle_margin: f32,
-    /// Indices of water triangles, for `water_surface_at`.
-    water: Vec<usize>,
     contacts: Vec<BoardCollision>,
     buffer: ContactBuffer,
 }
@@ -179,13 +146,8 @@ impl BoardWorld {
                 span * (2. * broadphase::THIN_MARGIN)
             })
             .fold(0., f32::max);
-        let water = (0..triangles.len())
-            .filter(|&i| is_water_tag(triangles[i].tag))
-            .collect();
         Self {
-            water,
             triangles,
-            external: None,
             triangle_bounds,
             query_metadata: None,
             query_index: query_index::QueryIndex::default(),
@@ -206,14 +168,6 @@ impl BoardWorld {
         }
     }
 
-    /// Whether the water at `point` on its surface is shallow: some geometry
-    /// lies within `FLOAT_DEPTH` under it (a channel, a ledge, a bank).
-    pub fn water_shallow_at(&self, point: Vector3) -> bool {
-        let start = Vector3::new(point.x, point.y - 0.001, point.z);
-        let end = Vector3::new(point.x, point.y - FLOAT_DEPTH, point.z);
-        !matches!(self.query_thin_line(start, end), Ok(None))
-    }
-
     pub fn with_query_metadata(
         triangles: Vec<WorldTriangle>,
         metadata: QueryMetadata,
@@ -225,20 +179,152 @@ impl BoardWorld {
         Ok(world)
     }
 
+    /// Append host static geometry as new canonical triangles. Existing order,
+    /// identity and packed surfaces are preserved; the new triangles take one
+    /// new ground query mesh with world-space identity transforms.
+    pub fn append_triangles(
+        &mut self,
+        triangles: Vec<WorldTriangle>,
+        packed_surfaces: Vec<u16>,
+    ) -> Result<std::ops::Range<usize>, &'static str> {
+        let start = self.triangles.len();
+        if triangles.is_empty() {
+            return if packed_surfaces.is_empty() {
+                Ok(start..start)
+            } else {
+                Err("Inserted surface count mismatch")
+            };
+        }
+        if packed_surfaces.len() != triangles.len() {
+            return Err("Inserted surface count mismatch");
+        }
+        let bounds = Bounds::from_points(
+            triangles.iter().flat_map(|t| t.triangle.vertices),
+        )
+        .ok_or("Invalid inserted geometry bounds")?;
+        for triangle in &triangles {
+            self.triangle_bounds.push(
+                Bounds::from_points(triangle.triangle.vertices).unwrap_or(Bounds {
+                    min: Vector3::new(
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                    ),
+                    max: Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+                }),
+            );
+        }
+        self.observe_extrema(&triangles, bounds);
+        let end = start + triangles.len();
+        let metadata = self
+            .query_metadata
+            .as_mut()
+            .ok_or("Canonical world has no authored query metadata")?;
+        metadata.packed_surfaces.extend(packed_surfaces);
+        metadata.meshes.push(QueryMesh {
+            triangle_range: start..end,
+            local_to_world: crate::physics::drive_frames::RetailAffineTransform::IDENTITY,
+            world_to_local: crate::physics::drive_frames::RetailAffineTransform::IDENTITY,
+            local_bounds: bounds,
+            matching_group: -1,
+            rejection_flags: 0,
+            geometry: 0,
+            pool: QueryPool::Ground,
+        });
+        self.triangles.extend(triangles);
+        self.query_index = query_index::QueryIndex::new(&metadata.meshes);
+        Ok(start..end)
+    }
+
+    /// Remove a canonical range previously returned by `append_triangles`.
+    /// Every query mesh contained in the range is dropped; base map meshes are
+    /// never partially cut because inserted geometry always owns whole meshes.
+    pub fn remove_triangles(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), &'static str> {
+        if range.start > range.end || range.end > self.triangles.len() {
+            return Err("Static geometry range outside canonical world");
+        }
+        if range.start == range.end {
+            return Ok(());
+        }
+        let removed = range.end - range.start;
+        self.triangles.drain(range.clone());
+        self.triangle_bounds.drain(range.clone());
+        {
+            let metadata = self
+                .query_metadata
+                .as_mut()
+                .ok_or("Canonical world has no authored query metadata")?;
+            metadata.packed_surfaces.drain(range.clone());
+            metadata.meshes.retain(|mesh| {
+                !(mesh.triangle_range.start >= range.start && mesh.triangle_range.end <= range.end)
+            });
+            for mesh in &mut metadata.meshes {
+                if mesh.triangle_range.start >= range.end {
+                    mesh.triangle_range = (mesh.triangle_range.start - removed)
+                        ..(mesh.triangle_range.end - removed);
+                }
+            }
+        }
+        self.recompute_extrema();
+        let meshes = &self
+            .query_metadata
+            .as_ref()
+            .ok_or("Canonical world has no authored query metadata")?
+            .meshes;
+        self.query_index = query_index::QueryIndex::new(meshes);
+        Ok(())
+    }
+
+    fn observe_extrema(&mut self, triangles: &[WorldTriangle], bounds: Bounds) {
+        for triangle in triangles {
+            let fatness = if triangle.triangle.fatness.is_finite()
+                && triangle.triangle.fatness >= 0.
+            {
+                triangle.triangle.fatness
+            } else {
+                f32::INFINITY
+            };
+            self.maximum_fatness = self.maximum_fatness.max(fatness);
+        }
+        let span = (bounds.max.x - bounds.min.x)
+            .max(bounds.max.y - bounds.min.y)
+            .max(bounds.max.z - bounds.min.z);
+        self.maximum_triangle_margin = self
+            .maximum_triangle_margin
+            .max(span * (2. * broadphase::THIN_MARGIN));
+    }
+
+    fn recompute_extrema(&mut self) {
+        self.maximum_fatness = self
+            .triangles
+            .iter()
+            .map(|t| {
+                if t.triangle.fatness.is_finite() && t.triangle.fatness >= 0. {
+                    t.triangle.fatness
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .fold(0., f32::max);
+        self.maximum_triangle_margin = self
+            .triangle_bounds
+            .iter()
+            .map(|b| {
+                let span = (b.max.x - b.min.x)
+                    .max(b.max.y - b.min.y)
+                    .max(b.max.z - b.min.z);
+                span * (2. * broadphase::THIN_MARGIN)
+            })
+            .fold(0., f32::max);
+    }
+
     pub fn query_metadata(&self) -> Result<&QueryMetadata, &'static str> {
         self.query_metadata
             .as_ref()
             .ok_or("Canonical world has no authored query metadata")
-    }
-
-    pub fn set_external_queries(&mut self, queries: Option<std::sync::Arc<dyn ExternalQueries>>) {
-        self.external = queries;
-    }
-    pub fn external_line(&self, start: Vector3, end: Vector3, radius: f32) -> Option<ExternalLineHit> {
-        self.external.as_ref()?.line(start, end, radius)
-    }
-    pub fn external_nearby(&self, center: Vector3, radius: f32) -> Vec<[Vector3; 3]> {
-        self.external.as_ref().map_or_else(Vec::new, |q| q.nearby(center, radius))
     }
 
     pub fn triangles(&self) -> &[WorldTriangle] {
@@ -267,7 +353,7 @@ impl BoardWorld {
             return Err("line query radius must be finite and nonnegative");
         }
         let direction = Vector3::new(end.x - start.x, end.y - start.y, end.z - start.z);
-        let mut nearest: Option<WorldLineHit> = self.external_line(start, end, radius).map(|h| h.hit);
+        let mut nearest: Option<WorldLineHit> = None;
         for (_, entry) in self.line_candidates(start, end, radius) {
             let mut geometry = TriangleLineHit {
                 position: Vector3::ZERO,
@@ -310,13 +396,12 @@ impl BoardWorld {
             .filter_map(|&id| {
                 let body = &board.bodies()[id.index()];
                 (body.state_flags != 1).then_some(BoardWorldVolume {
-                    collision_group: board.collision_group(),
                     body: CollisionBody::Board(id),
                     primitive: ContactPrimitive::Sphere(Sphere {
                         center: poses[id.index()].translation,
                         radius: settings.radius,
                     }),
-                    motion: VolumeMotion::of(&body.rates),
+                    linear_velocity: body.rates.linear_velocity,
                     material: settings.material,
                 })
             })
@@ -347,59 +432,34 @@ impl BoardWorld {
             } else {
                 f32::INFINITY
             };
-        // Cluster preselection only: a conservative superset of every pair the
-        // per-volume test below can keep.
-        let preselect_bounds: Vec<_> = volumes
+        let volume_bounds: Vec<_> = volumes
             .iter()
             .map(|v| {
                 primitive_bounds(v.primitive)
                     .map(|b| conservative_bounds(b, padding + self.maximum_fatness))
             })
             .collect();
-        // 82777E70: the swept, scaled box 8277BC58 tests every triangle against.
-        let volume_bounds: Vec<_> = volumes
-            .iter()
-            .map(|v| {
-                volume_query_bounds(v.primitive, v.motion, VOLUME_QUERY_STEP, VOLUME_QUERY_SCALE)
-            })
-            .collect();
-        let bounds: Option<Vec<_>> = preselect_bounds
-            .iter()
-            .zip(&volume_bounds)
-            .map(|(p, v)| match (p, v) {
-                (Some(p), Some(v)) => Some(Bounds {
-                    min: Vector3::new(p.min.x.min(v.min.x), p.min.y.min(v.min.y), p.min.z.min(v.min.z)),
-                    max: Vector3::new(p.max.x.max(v.max.x), p.max.y.max(v.max.y), p.max.z.max(v.max.z)),
-                }),
-                _ => None,
-            })
-            .collect();
+        let bounds: Option<Vec<_>> = volume_bounds.iter().copied().collect();
         let bounds = bounds
             .and_then(|b| Bounds::from_points(b.iter().flat_map(|b| [b.min, b.max])))
             .map(|b| b.expanded(padding));
         let ranges = self.candidate_ranges(bounds);
-        let mut output = std::mem::take(&mut self.contacts);
+        let output = &mut self.contacts;
         let mut publish = |records: &[ContactRecord]| {
             output.extend(records.iter().map(collision_from_record));
         };
-        'triangles: for index in ranges.into_iter().flatten() {
-            let entry = self.triangles[index];
+        for index in ranges.into_iter().flatten() {
+            let entry = &self.triangles[index];
             for (volume, volume_bounds) in volumes.iter().zip(&volume_bounds) {
-                // GroundPipeline8277BC58 checks the group/surface exclusion
-                // table before running the geometric dispatcher. Its stock
-                // initializer82767D60 sets only (7,12) and (16,12).
-                if matches!(volume.collision_group, 7 | 16) && is_water_tag(entry.tag) {
-                    continue;
-                }
-                // 8277BC58 BE94..BF38: unpadded triangle vertex box against the
-                // volume box, for every triangle. A non-finite box keeps the pair.
-                if volume_bounds.is_some_and(|b| !self.triangle_bounds[index].overlaps(b)) {
+                if self.query_metadata.is_some()
+                    && volume_bounds.is_some_and(|b| !self.triangle_bounds[index].overlaps(b))
+                {
                     continue;
                 }
                 let Some(manifold) = primitive_triangle_world_contacts(
                     volume.primitive,
                     entry.triangle,
-                    volume.motion.linear_velocity,
+                    volume.linear_velocity,
                     query,
                 ) else {
                     continue;
@@ -417,7 +477,7 @@ impl BoardWorld {
                     };
                     let Some(slot) = self.buffer.allocate(&mut publish) else {
                         self.buffer.flush(&mut publish);
-                        break 'triangles;
+                        return &self.contacts;
                     };
                     self.buffer.records[slot] = retention_record(volume.body, contact);
                     //8277C23C removes the most recent record on rejection.
@@ -427,57 +487,12 @@ impl BoardWorld {
                 }
             }
         }
-        if self.buffer.full == 0 {
-            self.buffer.flush(&mut publish);
-        }
-        self.contacts = output;
+        self.buffer.flush(&mut publish);
         &self.contacts
     }
 
     pub fn contacts(&self) -> &[BoardCollision] {
         &self.contacts
-    }
-
-    /// `water_surface_at`, but only where the water is at least `min_depth`
-    /// deep: no solid (or other) geometry within `min_depth` under the surface
-    /// at the point's XZ. Shallow water over a floor is not something to float in.
-    pub fn deep_water_surface_at(
-        &self,
-        point: Vector3,
-        above: f32,
-        max_depth: f32,
-        min_depth: f32,
-    ) -> Option<f32> {
-        let surface = self.water_surface_at(point, above, max_depth)?;
-        let start = Vector3::new(point.x, surface - 0.001, point.z);
-        let end = Vector3::new(point.x, surface - min_depth, point.z);
-        matches!(self.query_thin_line(start, end), Ok(None)).then_some(surface)
-    }
-
-    /// Height of the water surface over `point`, when the point lies at most
-    /// `max_depth` below it (or less than `above` over it). Water surfaces are
-    /// the type-12 triangles, interpolated at the point's XZ; the nearest
-    /// surface at or above the point wins.
-    pub fn water_surface_at(&self, point: Vector3, above: f32, max_depth: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
-        for &index in &self.water {
-            let [a, b, c] = self.triangles[index].triangle.vertices;
-            let det = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
-            if det.abs() < 1e-8 {
-                continue;
-            }
-            let u = ((point.x - a.x) * (c.z - a.z) - (c.x - a.x) * (point.z - a.z)) / det;
-            let v = ((b.x - a.x) * (point.z - a.z) - (point.x - a.x) * (b.z - a.z)) / det;
-            if u < 0. || v < 0. || u + v > 1. {
-                continue;
-            }
-            let height = a.y + u * (b.y - a.y) + v * (c.y - a.y);
-            let depth = height - point.y;
-            if depth > -above && depth <= max_depth && best.is_none_or(|h| height < h) {
-                best = Some(height);
-            }
-        }
-        best
     }
 
     pub fn dropped_contacts(&self) -> u32 {

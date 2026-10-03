@@ -86,6 +86,7 @@ use skate_core::{
         board_runtime::{BoardMotion, BoardRuntime},
         board_world::{BoardWorld, ContactRetentionSettings},
         collision::WorldContactSettings,
+        contact::RetailContactMaterial,
         drive_frames::RetailAffineTransform,
     },
 };
@@ -236,6 +237,29 @@ impl GamePhysics {
 
     pub(crate) fn world(&self) -> &BoardWorld {
         &self.world
+    }
+
+    pub(crate) fn floor_material(&self) -> RetailContactMaterial {
+        self.settings.floor_material
+    }
+
+    /// Append dropped-object triangles to the live static world. The returned
+    /// range is the canonical handle used by `remove_static_geometry`.
+    pub(crate) fn append_static_geometry(
+        &mut self,
+        triangles: Vec<skate_core::physics::board_world::WorldTriangle>,
+        packed_surfaces: Vec<u16>,
+    ) -> Result<std::ops::Range<usize>, String> {
+        self.world
+            .append_triangles(triangles, packed_surfaces)
+            .map_err(str::to_owned)
+    }
+
+    pub(crate) fn remove_static_geometry(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), String> {
+        self.world.remove_triangles(range).map_err(str::to_owned)
     }
 
     /// Flat-world convenience used by private-asset integration tests.
