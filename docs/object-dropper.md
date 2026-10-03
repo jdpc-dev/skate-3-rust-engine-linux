@@ -8,18 +8,18 @@ and no native addresses or behaviour are asserted here.
 
 ## Controls
 
-- Dismount (biped) and hold **LB + B** to open or close the dropper.
+- Hold **LB + B** to open or close the dropper (on or off the board).
 - **D-pad Up/Down** select a catalog entry.
 - **`[` / `]`** (keyboard) or **D-pad Left/Right** rotate the ghost.
 - **A** places the selected prop at the ghost; pressing A again duplicates it.
 - **X** deletes the most recently placed prop.
 - **B** closes the menu.
-- Keyboard development fallback: **F6** toggles, arrows select, **Enter** places,
+- Keyboard development fallback: **F7** toggles, arrows select, **Enter** places,
   **Backspace** deletes.
 
-The menu keeps the simulation running. The skater must be off the board, and the
-dropper is unavailable during replay or a map transition. At most 32 props are
-kept; placing beyond the cap removes the oldest.
+The menu keeps the simulation running and can be opened on or off the board.
+It is unavailable during replay, a map transition or the pause menu. At most 32
+props are kept; placing beyond the cap removes the oldest.
 
 ## Placement and collision
 

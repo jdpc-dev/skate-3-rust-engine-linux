@@ -24,6 +24,9 @@ struct Entry {
 #[derive(Resource, Default)]
 pub(crate) struct Navigation {
     pub pressed: u16,
+    /// Raw held XInput/Menu buttons this frame (LB=0x100, RB=0x200, A=0x1000,
+    /// B=0x2000, X=0x4000). Stick-derived direction bits are not included.
+    pub held: u16,
     preview_turn: f32,
     zoom: f32,
     previous: u16,
@@ -256,6 +259,8 @@ pub(crate) fn navigation(mut nav: ResMut<Navigation>, time: Res<Time<Real>>, key
         let z_out = p.state.buttons & 0x100 != 0;
         (z_in as i32 - z_out as i32) as f32
     });
+    let buttons = pad.as_ref().map_or(0, |p| p.state.buttons);
+    nav.held = buttons;
     let mut current = pad.map_or(0, |p| {
             p.state.buttons
                 | if p.state.left[1] > 16000 {

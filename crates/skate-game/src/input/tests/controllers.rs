@@ -34,6 +34,32 @@ fn packet(number: u32, buttons: u16, left: [i16; 2]) -> Result<DevicePacket, Dev
 }
 
 #[test]
+fn object_dropper_maps_lb_held_b_press_and_navigation_slots() {
+    use skate_core::input::pad::Pad;
+    let mut input = ControllerInput::default();
+    input.status[0] = ControllerStatus::Ready;
+    let mut records = vec![[0u32; 4]; 16];
+    records[8] = [0, 0x0100, 0, 0]; // LB held
+    records[13] = [0, 0x0100_0000, 0, 0]; // B press edge
+    records[0] = [0, 0x0100_0000, 0, 0]; // D-pad up press edge
+    records[1] = [0, 0x0101, 0, 0]; // D-pad down held with native repeat
+    records[2] = [0, 0x0100_0000, 0, 0]; // D-pad left press edge
+    records[3] = [0, 0x0101, 0, 0]; // D-pad right held with native repeat
+    records[12] = [0, 0x0100_0000, 0, 0]; // A press edge
+    records[14] = [0, 0x0100_0000, 0, 0]; // X press edge
+    input.pads[0] = Pad::from_records(records);
+    let actions = input.object_dropper_actions();
+    assert!(actions.open);
+    assert!(actions.cancel);
+    assert!(actions.up);
+    assert!(actions.down);
+    assert!(actions.left);
+    assert!(actions.right);
+    assert!(actions.confirm);
+    assert!(actions.delete);
+}
+
+#[test]
 fn raw_packets_reach_stock_actions_without_losing_device_identity() {
     let mut input = ControllerInput::default();
     input.collect([
