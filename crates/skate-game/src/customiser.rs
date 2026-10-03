@@ -25,6 +25,7 @@ struct Entry {
 pub(crate) struct Navigation {
     pub pressed: u16,
     preview_turn: f32,
+    zoom: f32,
     previous: u16,
     held_for: f32,
     repeat_at: f32,
@@ -35,6 +36,7 @@ pub(crate) struct Customiser {
     pub enabled: bool,
     just_opened: bool,
     preview_yaw: f32,
+    zoom: f32,
     index: Entry,
     path: Vec<usize>,
     selected: usize,
@@ -51,6 +53,7 @@ impl Customiser {
         self.enabled = true;
         self.just_opened = true;
         self.preview_yaw = 0.;
+        self.zoom = 1.;
         self.path.clear();
         self.search.clear();
         self.selected = 0;
@@ -84,7 +87,8 @@ impl Customiser {
     }
     pub fn preview_camera(&self) -> (f32, f32, f32) {
         let (height, distance, yaw) = self.preview_framing();
-        (height, distance, yaw + self.preview_yaw)
+        // Bumpers scale the framing distance without moving the look-at point.
+        (height, distance * self.zoom, yaw + self.preview_yaw)
     }
     fn preview_framing(&self) -> (f32, f32, f32) {
         let mut page = &self.index;
@@ -233,7 +237,7 @@ impl Plugin for CustomiserPlugin {
             .add_systems(PostStartup, setup)
             .add_systems(
                 Update,
-                (interact, rotate_preview, crate::customiser_parts::update, draw)
+                (interact, rotate_preview, zoom_preview, crate::customiser_parts::update, draw)
                     .chain()
                     .after(crate::graphics_menu::interact)
                     .before(crate::app::FrameSet::Animation),
@@ -245,6 +249,13 @@ pub(crate) fn navigation(mut nav: ResMut<Navigation>, time: Res<Time<Real>>, key
     // Remap outside the dead zone so a resting stick cannot drift the preview.
     let axis = pad.as_ref().map_or(0., |p| (p.state.right[0] as f32 / 32767.).clamp(-1., 1.));
     nav.preview_turn = axis.signum() * ((axis.abs() - 0.24) / 0.76).max(0.);
+    // RB zooms in, LB zooms out; both are digital but read as held so the view
+    // keeps moving while the bumper is down.
+    nav.zoom = pad.as_ref().map_or(0., |p| {
+        let z_in = p.state.buttons & 0x200 != 0;
+        let z_out = p.state.buttons & 0x100 != 0;
+        (z_in as i32 - z_out as i32) as f32
+    });
     let mut current = pad.map_or(0, |p| {
             p.state.buttons
                 | if p.state.left[1] > 16000 {
@@ -290,6 +301,13 @@ fn rotate_preview(mut state: ResMut<Customiser>, nav: Res<Navigation>, time: Res
         // Real time keeps inspection responsive while gameplay is paused.
         state.preview_yaw = (state.preview_yaw + nav.preview_turn * 2.0 * time.delta_secs().min(0.1))
             .rem_euclid(std::f32::consts::TAU);
+    }
+}
+
+fn zoom_preview(mut state: ResMut<Customiser>, nav: Res<Navigation>, time: Res<Time<Real>>) {
+    if state.open && nav.zoom != 0. {
+        let step = nav.zoom * 1.6 * time.delta_secs().min(0.1);
+        state.zoom = (state.zoom - step).clamp(0.4, 2.5);
     }
 }
 
@@ -689,6 +707,7 @@ fn setup(mut commands: Commands, config: Res<crate::config::Config>, parts: Res<
         enabled,
         just_opened: false,
         preview_yaw: 0.,
+        zoom: 1.,
         index: menu(&parts.library, extras),
         path: vec![],
         selected: 0,
@@ -1342,10 +1361,10 @@ fn draw(
         });
         p.spawn((
             Text::new(if state.path.is_empty() {
-                "Right stick: Rotate   •   Done saves and resumes
-Y saves a copy to settings/characters"
+                "Right stick: Rotate   •   RB/LB: Zoom
+Done saves and resumes   •   Y saves a copy to settings/characters"
             } else {
-                "↑↓ Browse   ←→ Change   Right stick: Rotate
+                "↑↓ Browse   ←→ Change   Right stick: Rotate   RB/LB: Zoom
 Type to search"
             }),
             TextFont {
@@ -1403,7 +1422,7 @@ mod tests {
             .init_resource::<Assets<crate::customiser_material::SkaterMaterial>>();
         let world = app.world_mut();
         world.insert_resource(Customiser {
-            open: true, enabled: true, just_opened: false, preview_yaw: 0.,
+            open: true, enabled: true, just_opened: false, preview_yaw: 0., zoom: 1.,
             index: Entry::default(), path: vec![], selected: 0, page_size: 6,
             search: String::new(), draft: json!({"selections":{},"morphs":{}}),
             settings: PathBuf::new(), status: String::new(), redraw: false,
@@ -1414,6 +1433,19 @@ mod tests {
         assert_eq!(*world.get::<Visibility>(stock).unwrap(), Visibility::Inherited);
         assert!(world.resource::<Customiser>().status.contains("unavailable"));
         assert!(world.resource::<Parts>().applied.is_null());
+    }
+    #[test]
+    fn customiser_zoom_scales_only_the_preview_distance() {
+        let mut state = Customiser {
+            open: true, enabled: true, just_opened: false, preview_yaw: 0.7, zoom: 1.,
+            index: Entry::default(), path: vec![], selected: 0, page_size: 6,
+            search: String::new(), draft: json!({"selections":{},"morphs":{}}),
+            settings: PathBuf::new(), status: String::new(), redraw: false,
+        };
+        let (height, distance, yaw) = state.preview_camera();
+        state.zoom = 0.5;
+        assert_eq!(state.preview_camera(), (height, distance * 0.5, yaw));
+        assert_eq!(yaw, 0.7, "zoom must not touch the preview rotation");
     }
     #[test]
     fn customiser_colour_choice_is_distinct_from_the_original() {
@@ -1555,7 +1587,7 @@ mod tests {
         let draft = json!({"gender":"male","selections":{
             "Rostral":{"asset_id":"head","material_id":"head"}},"morphs":{},"colours":{}});
         let state = Customiser {
-            open: true, enabled: true, just_opened: false, preview_yaw: 0.,
+            open: true, enabled: true, just_opened: false, preview_yaw: 0., zoom: 1.,
             index: Entry::default(), path: vec![], selected: 0, page_size: 6,
             search: String::new(), draft: draft.clone(), settings: dir.join("character.json"),
             status: String::new(), redraw: false,
@@ -1599,6 +1631,7 @@ mod tests {
                 enabled: true,
                 just_opened: false,
                 preview_yaw: 0.,
+                zoom: 1.,
                 index: menu(&parts.library, extras.clone()),
                 path: vec![],
                 selected: 0,
