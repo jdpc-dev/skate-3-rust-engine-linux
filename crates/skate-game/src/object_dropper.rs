@@ -113,7 +113,23 @@ impl Plugin for ObjectDropperPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PropTemplates>()
             .init_resource::<Dropper>()
-            .add_systems(Update, (refresh, run, draw_ui, toggle_hud).chain());
+            .add_systems(PreUpdate, refresh)
+            // Use the same per-frame menu navigation the travel menu uses: it
+            // edge-detects the raw pad in PreUpdate, so it does not race the
+            // FixedUpdate pad publication.
+            .add_systems(
+                Update,
+                run.run_if(crate::graphics_menu::gameplay_active)
+                    .before(draw_ui),
+            )
+            .add_systems(Update, (draw_ui, toggle_hud, close_when_paused).chain());
+    }
+}
+
+fn close_when_paused(mut dropper: ResMut<Dropper>, menu: Res<crate::graphics_menu::Menu>) {
+    if dropper.open && !crate::graphics_menu::gameplay_active(Some(menu)) {
+        dropper.open = false;
+        dropper.revision = dropper.revision.wrapping_add(1);
     }
 }
 
@@ -401,6 +417,7 @@ fn remove_placed(
 fn run(
     mut commands: Commands,
     input: Res<ControllerInput>,
+    nav: Res<crate::customiser::Navigation>,
     keys: Res<ButtonInput<KeyCode>>,
     mut dropper: ResMut<Dropper>,
     mut templates: ResMut<PropTemplates>,
@@ -413,33 +430,66 @@ fn run(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut preview_query: Query<&mut Transform, Without<DropperRoot>>,
+    mut toggle_prev: Local<bool>,
 ) {
+    let toggle_held = keys.pressed(KeyCode::F7);
+    let toggle = toggle_held && !*toggle_prev;
+    *toggle_prev = toggle_held;
     let actions = input.object_dropper_actions();
     let fresh = dropper.last_batch != input.consumed_batches;
     if fresh {
         dropper.last_batch = input.consumed_batches;
     }
-    let off_board = skater.player_input.physical.state.category_12 == 500;
     let suspended = replay.active
         || transition.busy()
         || !crate::graphics_menu::gameplay_active(Some(menu));
-    if dropper.open && (!off_board || suspended) {
+    if dropper.open && suspended {
         dropper.open = false;
         dropper.revision = dropper.revision.wrapping_add(1);
     }
-    let open = (actions.open && fresh) || keys.just_pressed(KeyCode::F6);
-    if open && dropper.available && !dropper.open && off_board && !suspended {
-        dropper.open = true;
-        dropper.revision = dropper.revision.wrapping_add(1);
+    // Navigation polls and edge-detects the raw pad once per frame; the Pad
+    // path is a fallback for the LB+B chord.
+    let lb = nav.held & 0x0100 != 0;
+    let open = (lb && nav.pressed & 0x2000 != 0)
+        || (actions.open && fresh)
+        || toggle;
+    let confirm = nav.pressed & 0x1000 != 0
+        || actions.confirm && fresh
+        || keys.just_pressed(KeyCode::Enter);
+    let cancel = nav.pressed & 0x2000 != 0 || (actions.cancel && fresh);
+    let delete = nav.pressed & 0x4000 != 0
+        || (actions.delete && fresh)
+        || keys.just_pressed(KeyCode::Backspace);
+    let up = nav.pressed & 1 != 0 || (actions.up && fresh);
+    let down = nav.pressed & 2 != 0 || (actions.down && fresh);
+    let left = nav.pressed & 4 != 0
+        || (actions.left && fresh)
+        || keys.just_pressed(KeyCode::BracketLeft);
+    let right = nav.pressed & 8 != 0
+        || (actions.right && fresh)
+        || keys.just_pressed(KeyCode::BracketRight);
+    // LB+B sets both `open` and `cancel` on the same press; never let the same
+    // press close the menu it just opened.
+    let mut opened_this_tick = false;
+    if open && !dropper.open {
+        if !dropper.available {
+            debug!("Object dropper requested but this map has no catalog");
+        } else if suspended {
+            debug!("Object dropper unavailable during pause/replay/map change");
+        } else {
+            info!("Object dropper opened ({} templates)", templates.templates.len());
+            dropper.open = true;
+            dropper.revision = dropper.revision.wrapping_add(1);
+            opened_this_tick = true;
+        }
     } else if open && dropper.open {
+        info!("Object dropper closed");
         dropper.open = false;
         dropper.revision = dropper.revision.wrapping_add(1);
     }
     if dropper.open {
         let count = templates.templates.len();
         if count != 0 {
-            let up = (actions.up && fresh) || keys.just_pressed(KeyCode::ArrowUp);
-            let down = (actions.down && fresh) || keys.just_pressed(KeyCode::ArrowDown);
             if down {
                 dropper.selected = (dropper.selected + 1) % count;
                 dropper.revision = dropper.revision.wrapping_add(1);
@@ -447,20 +497,16 @@ fn run(
                 dropper.selected = (dropper.selected + count - 1) % count;
                 dropper.revision = dropper.revision.wrapping_add(1);
             }
-            let left = (actions.left && fresh) || keys.just_pressed(KeyCode::BracketLeft);
-            let right = (actions.right && fresh) || keys.just_pressed(KeyCode::BracketRight);
             if left {
                 dropper.yaw += ROTATION_STEP;
             } else if right {
                 dropper.yaw -= ROTATION_STEP;
             }
-            if (actions.delete && fresh) || keys.just_pressed(KeyCode::Backspace) {
-                if !dropper.placed.is_empty() {
-                    let last = dropper.placed.len() - 1;
-                    remove_placed(&mut commands, &mut physics, &mut dropper, last);
-                }
+            if delete && !dropper.placed.is_empty() {
+                let last = dropper.placed.len() - 1;
+                remove_placed(&mut commands, &mut physics, &mut dropper, last);
             }
-            if actions.cancel && fresh {
+            if cancel && !opened_this_tick {
                 dropper.open = false;
                 dropper.revision = dropper.revision.wrapping_add(1);
             }
@@ -509,7 +555,6 @@ fn run(
             *current = transform;
         }
     }
-    let confirm = (actions.confirm && fresh) || keys.just_pressed(KeyCode::Enter);
     if !confirm {
         return;
     }
@@ -651,7 +696,12 @@ fn toggle_hud(
     dropper: Res<Dropper>,
     hud: Res<crate::session_marker::hud::DropperHud>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut applied: Local<Option<bool>>,
 ) {
+    if *applied == Some(dropper.available) {
+        return;
+    }
+    *applied = Some(dropper.available);
     for (handle, base) in &hud.0 {
         if let Some(material) = materials.get_mut(handle) {
             let alpha = if dropper.available {

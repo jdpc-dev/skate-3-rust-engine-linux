@@ -90,15 +90,17 @@ impl ControllerInput {
         let flags = |i: usize| pad.records().get(i).map_or(0, |r| r[1]);
         let pressed = |i: usize| flags(i) & 0xff00_0000 != 0;
         let held = |i: usize| flags(i) & 0xff00 != 0;
+        // Navigation repeats while held; the pad sets the low repeat bits.
+        let nav = |i: usize| pressed(i) || flags(i) & 0xff != 0;
         ObjectDropperActions {
             open: held(8) && pressed(13),
             confirm: pressed(12),
             cancel: pressed(13),
             delete: pressed(14),
-            up: pressed(0),
-            down: pressed(1),
-            left: pressed(2),
-            right: pressed(3),
+            up: nav(0),
+            down: nav(1),
+            left: nav(2),
+            right: nav(3),
         }
     }
     pub(crate) fn raw_input(&self) -> RawInput {
