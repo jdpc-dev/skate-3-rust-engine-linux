@@ -316,7 +316,14 @@ impl Definition {
             .filter(|v| v.is_finite())
     }
     pub fn supported(&self, tuning: &MaterialTuning) -> bool {
-        (1..=13).contains(&self.family) || match self.family {
+        // Authored DMO objects (`dynamicobject.*`) have no dedicated family in
+        // the family map and land on family0. The world shader's general branch
+        // still lights them (diffuse + normal + fixed sun), which matches the
+        // surrounding world far better than the directional-light-starved PBR
+        // fallback. This is a host lighting choice, not a recovered native
+        // dynamicobject shader.
+        self.shader.starts_with("dynamicobject.")
+            || (1..=13).contains(&self.family) || match self.family {
             14 | 32 => tuning.rows.get(&self.shader).is_some_and(|r| !r.is_empty()),
             31 => tuning.pca_available && tuning.rows.get(&self.shader).is_some_and(|r| r.len() == 3),
             30 => tuning.rows.get(&self.shader).is_some_and(|r| r.len() == 4),

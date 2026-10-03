@@ -755,6 +755,7 @@ mod tests {
         };
         let templates = load_catalog(Path::new(&dir)).expect("catalog");
         assert!(!templates.is_empty());
+        let verbose = std::env::var_os("SKATE_DROPPER_TEST_VERBOSE").is_some();
         for template in &templates {
             let bytes = std::fs::read(&template.file).unwrap();
             let map = SkateMap::parse_render_only(&bytes).unwrap();
@@ -767,6 +768,55 @@ mod tests {
                 .map(|v| v.position[1])
                 .fold(f32::INFINITY, f32::min);
             assert!(min_y.abs() < 1e-3, "{} min_y {min_y}", template.name);
+            let retail_supported = map.materials[0]
+                .retail_definition
+                .as_deref()
+                .and_then(crate::retail_render::Definition::parse)
+                .map(|d| d.supported(&crate::retail_render::MaterialTuning::default()));
+            assert_eq!(
+                retail_supported,
+                Some(true),
+                "{} must use the retail object lighting path",
+                template.name
+            );
+            if verbose {
+                let bad_normals = map
+                    .geometry
+                    .vertices
+                    .iter()
+                    .filter(|v| {
+                        let n = v.normal;
+                        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                        (len - 1.).abs() >= 0.05 && len > 1e-6
+                    })
+                    .count();
+                let zero_normals = map
+                    .geometry
+                    .vertices
+                    .iter()
+                    .filter(|v| v.normal == [0., 0., 0.])
+                    .count();
+                let up = map
+                    .geometry
+                    .vertices
+                    .iter()
+                    .filter(|v| v.normal[1] > 0.9)
+                    .count();
+                let material = &map.materials[0];
+                eprintln!(
+                    "DROPPER_DEBUG {} verts={} normals_bad={} normals_zero={} normals_up={} textures={:?} retail_definition={} retail_supported={:?} alpha_mode={} color={:?}",
+                    template.name,
+                    map.geometry.vertices.len(),
+                    bad_normals,
+                    zero_normals,
+                    up,
+                    material.textures,
+                    material.retail_definition.is_some(),
+                    retail_supported,
+                    material.alpha_mode,
+                    material.color,
+                );
+            }
         }
     }
 

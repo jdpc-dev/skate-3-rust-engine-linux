@@ -25,11 +25,12 @@ props are kept; placing beyond the cap removes the oldest.
 
 Props come from authored DMO templates already extracted for the map. Their
 render batches are built by the same map grouping and material code as the
-world (`skate_world::object_assets`), so retail-family materials use the retail
-world shader and the rest use the world's PBR fallback (diffuse, normal, ORM,
-emissive and lightmap exposure) rather than a hand-built material. The native
-`dynamicobject.default` shader has no family mapping and therefore uses the PBR
-fallback, matching the authored `native-props` supplement.
+world (`skate_world::object_assets`). Authored `dynamicobject.*` materials run
+through the retail world shader's general branch (family 0), which lights them
+with diffuse/normal and the fixed authored sun direction, matching the
+surrounding world. This is a host lighting choice, not a recovered native
+dynamicobject shader. Materials without a retail definition still use the
+world's PBR fallback.
 
 Placed props spawn a render entity and append their **render-mesh triangles** to the
 live `BoardWorld` as static ground geometry, so the skater can land on them. The
