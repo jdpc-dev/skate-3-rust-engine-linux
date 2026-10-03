@@ -60,6 +60,12 @@ indexed edge bodies:
 Note: `crates/skate-game/src/physics/offboard/ground_state.rs` is dead code (not
 declared in `offboard/mod.rs`); the live path is `SceneService`.
 
+Host-placed ramps from the Object Dropper contribute coping/ledge edges through
+the same `SceneService`: `GamePhysics::host_edges` holds world-space segments
+built from the prop's top rim/crease (`object_dropper::build_drop_edges`) and is
+bounded in `edge_candidates` like the authored splines. See
+[object-dropper.md](object-dropper.md).
+
 ### Mount drop-in conditions
 
 - `crates/skate-game/src/graph_host/motion_conditions.rs`
