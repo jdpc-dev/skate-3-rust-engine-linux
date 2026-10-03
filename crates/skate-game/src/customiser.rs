@@ -27,11 +27,17 @@ pub(crate) struct Navigation {
     /// Raw held XInput/Menu buttons this frame (LB=0x100, RB=0x200, A=0x1000,
     /// B=0x2000, X=0x4000). Stick-derived direction bits are not included.
     pub held: u16,
+    /// Edge/repeat of the raw buttons only. Unlike `pressed`, the stick never
+    /// contributes D-pad bits here, so menus can require the physical D-pad.
+    pub pressed_buttons: u16,
     preview_turn: f32,
     zoom: f32,
     previous: u16,
+    previous_buttons: u16,
     held_for: f32,
     repeat_at: f32,
+    button_held_for: f32,
+    button_repeat_at: f32,
 }
 #[derive(Resource)]
 pub(crate) struct Customiser {
@@ -300,6 +306,20 @@ pub(crate) fn navigation(mut nav: ResMut<Navigation>, time: Res<Time<Real>>, key
         nav.repeat_at = 0.35;
     }
     nav.previous = current;
+    // Physical D-pad edges only. The repeat applies to the D-pad bits (0..=3);
+    // the stick never enters `button`, so a menu using this ignores the stick.
+    nav.pressed_buttons = buttons & !nav.previous_buttons;
+    if buttons & 15 != 0 && buttons & 15 == nav.previous_buttons & 15 {
+        nav.button_held_for += time.delta_secs();
+        if nav.button_held_for >= nav.button_repeat_at {
+            nav.pressed_buttons |= buttons & 15;
+            nav.button_repeat_at += 0.09;
+        }
+    } else {
+        nav.button_held_for = 0.;
+        nav.button_repeat_at = 0.35;
+    }
+    nav.previous_buttons = buttons;
 }
 fn rotate_preview(mut state: ResMut<Customiser>, nav: Res<Navigation>, time: Res<Time<Real>>) {
     if state.open && nav.preview_turn != 0. {

@@ -8,7 +8,15 @@ and no native addresses or behaviour are asserted here.
 
 ## Controls
 
-- Hold **LB + B** to open or close the dropper (on or off the board).
+- Hold **LB + B** to open or close the dropper.
+- Opening forces the player off the board (the manual teleport reset with
+  `on_board=false`, the same path as vehicle ejection) so they can walk to the
+  placement spot.
+- **D-pad only** navigates the catalog; the left stick is ignored by the menu so
+  it stays free for walking.
+- The ghost spawns **in front of the player**, along the gameplay camera's
+  horizontal forward (the raw animation root's forward axis is the skater's
+  back), then ground-snaps down and follows the player as they walk.
 - **D-pad Up/Down** select a catalog entry.
 - **`[` / `]`** (keyboard) or **D-pad Left/Right** rotate the ghost.
 - **A** places the selected prop at the ghost; pressing A again duplicates it.
@@ -17,9 +25,12 @@ and no native addresses or behaviour are asserted here.
 - Keyboard development fallback: **F7** toggles, arrows select, **Enter** places,
   **Backspace** deletes.
 
-The menu keeps the simulation running and can be opened on or off the board.
-It is unavailable during replay, a map transition or the pause menu. At most 32
-props are kept; placing beyond the cap removes the oldest.
+While the menu is open, gameplay is gated: the face buttons, bumpers, triggers
+and D-pad are zeroed for the simulation to prevent accidental jumps, tricks or
+falls, but the analog sticks stay live for movement. The menu keeps the
+simulation running and is unavailable during replay, a map transition or the
+pause menu. At most 32 props are kept; placing beyond the cap removes the
+oldest.
 
 ## Placement and collision
 

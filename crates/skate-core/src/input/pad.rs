@@ -32,6 +32,16 @@ impl Pad {
     pub fn records(&self) -> &[[u32; 4]] {
         &self.records
     }
+    /// Host suppression zeroes only the value word; held/press/repeat edges are
+    /// preserved for consumers that read edge bits directly. Re-applied every
+    /// publication.
+    pub fn suppress_values(&mut self, slots: &[usize]) {
+        for &slot in slots {
+            if let Some(record) = self.records.get_mut(slot) {
+                record[0] = 0;
+            }
+        }
+    }
 
     /// Complete update, including growth reset, updated count on shorter
     /// polls, three-call edge suppression and 24/12-call repeat intervals.
@@ -75,5 +85,22 @@ impl Pad {
                 record[1] &= !255;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn suppress_values_keeps_held_and_press_edges() {
+        let mut pad = Pad::from_records(vec![
+            [0x3f80_0000, 0x0000_0100, 5, 2],
+            [0x3f80_0000, 0x0100_0000, 0, 0],
+        ]);
+        pad.suppress_values(&[0, 1]);
+        assert_eq!(pad.records()[0][0], 0);
+        assert_eq!(pad.records()[0][1], 0x0000_0100);
+        assert_eq!(pad.records()[1][0], 0);
+        assert_eq!(pad.records()[1][1], 0x0100_0000);
     }
 }
