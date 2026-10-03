@@ -30,6 +30,9 @@ pub(crate) struct ControllerInput {
     pub mapped_actions: [[f32; 18]; DEVICE_SLOTS],
     pub publications: u64,
     pub consumed_batches: u64,
+    /// Host gate: while set, face buttons, bumpers, triggers and D-pad are
+    /// zeroed for gameplay. Sticks are untouched so the player can still move.
+    pub suppress_gameplay: bool,
     tick: u64,
 }
 
@@ -46,6 +49,7 @@ impl Default for ControllerInput {
             mapped_actions: [[0.0; 18]; DEVICE_SLOTS],
             publications: 0,
             consumed_batches: 0,
+            suppress_gameplay: false,
             tick: 0,
         }
     }
@@ -172,7 +176,16 @@ impl ControllerInput {
     /// actual actor timestep and state flags and are not driven by render dt.
     pub(super) fn publish_actions(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
-        if !self.history.drain_to_latest(&mut self.pads) {
+        let drained = self.history.drain_to_latest(&mut self.pads);
+        if self.suppress_gameplay {
+            // Face buttons, bumpers, triggers and D-pad. Sticks (16..=23) and
+            // Start/Back stay live so the player can still move.
+            const SLOTS: [usize; 14] = [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+            for pad in &mut self.pads {
+                pad.suppress_values(&SLOTS);
+            }
+        }
+        if !drained {
             return false;
         }
         for (device, pad) in self.pads.iter().enumerate() {

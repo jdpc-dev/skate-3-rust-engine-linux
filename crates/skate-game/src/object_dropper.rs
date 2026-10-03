@@ -440,19 +440,23 @@ fn remove_placed(
 #[allow(clippy::too_many_arguments)]
 fn run(
     mut commands: Commands,
-    input: Res<ControllerInput>,
+    mut input: ResMut<ControllerInput>,
     nav: Res<crate::customiser::Navigation>,
     keys: Res<ButtonInput<KeyCode>>,
     mut dropper: ResMut<Dropper>,
     mut templates: ResMut<PropTemplates>,
     mut physics: ResMut<GamePhysics>,
-    skater: Res<SkaterRuntime>,
+    mut skater: ResMut<SkaterRuntime>,
     replay: Res<Replay>,
     transition: Res<MapTransition>,
     menu: Res<crate::graphics_menu::Menu>,
     mut assets: DropperAssets,
     tuning: Res<DropperTuning>,
-    mut preview_query: Query<&mut Transform, Without<DropperRoot>>,
+    mut preview_query: Query<
+        &mut Transform,
+        (Without<DropperRoot>, Without<crate::camera::GameplayCamera>),
+    >,
+    camera: Query<&Transform, With<crate::camera::GameplayCamera>>,
     mut toggle_prev: Local<bool>,
 ) {
     let toggle_held = keys.pressed(KeyCode::F7);
@@ -470,25 +474,26 @@ fn run(
         dropper.open = false;
         dropper.revision = dropper.revision.wrapping_add(1);
     }
-    // Navigation polls and edge-detects the raw pad once per frame; the Pad
-    // path is a fallback for the LB+B chord.
+    // Menu navigation is D-pad only (`pressed_buttons` never includes the
+    // stick), so the player can keep steering with the joystick. The Pad path
+    // is a fallback for the LB+B chord.
     let lb = nav.held & 0x0100 != 0;
-    let open = (lb && nav.pressed & 0x2000 != 0)
+    let open = (lb && nav.pressed_buttons & 0x2000 != 0)
         || (actions.open && fresh)
         || toggle;
-    let confirm = nav.pressed & 0x1000 != 0
+    let confirm = nav.pressed_buttons & 0x1000 != 0
         || actions.confirm && fresh
         || keys.just_pressed(KeyCode::Enter);
-    let cancel = nav.pressed & 0x2000 != 0 || (actions.cancel && fresh);
-    let delete = nav.pressed & 0x4000 != 0
+    let cancel = nav.pressed_buttons & 0x2000 != 0 || (actions.cancel && fresh);
+    let delete = nav.pressed_buttons & 0x4000 != 0
         || (actions.delete && fresh)
         || keys.just_pressed(KeyCode::Backspace);
-    let up = nav.pressed & 1 != 0 || (actions.up && fresh);
-    let down = nav.pressed & 2 != 0 || (actions.down && fresh);
-    let left = nav.pressed & 4 != 0
+    let up = nav.pressed_buttons & 1 != 0 || (actions.up && fresh);
+    let down = nav.pressed_buttons & 2 != 0 || (actions.down && fresh);
+    let left = nav.pressed_buttons & 4 != 0
         || (actions.left && fresh)
         || keys.just_pressed(KeyCode::BracketLeft);
-    let right = nav.pressed & 8 != 0
+    let right = nav.pressed_buttons & 8 != 0
         || (actions.right && fresh)
         || keys.just_pressed(KeyCode::BracketRight);
     // LB+B sets both `open` and `cancel` on the same press; never let the same
@@ -504,12 +509,23 @@ fn run(
             dropper.open = true;
             dropper.revision = dropper.revision.wrapping_add(1);
             opened_this_tick = true;
+            // Bajar al jugador de la tabla: reuse the manual teleport reset with
+            // on_board=false (the same path as vehicle ejection), which enters
+            // the off-board biped ground state.
+            if skater.player_input.physical.state.category_12 != 500 {
+                let transform = skater.animated_skeleton.roots.animation_to_world;
+                if skater.player_input.request_teleport(transform).is_ok() {
+                    skater.teleport_state.request_manual(transform, false);
+                }
+            }
         }
     } else if open && dropper.open {
         info!("Object dropper closed");
         dropper.open = false;
         dropper.revision = dropper.revision.wrapping_add(1);
     }
+    // Block jump/tricks/remount while the menu is open; movement stays live.
+    input.suppress_gameplay = dropper.open;
     if dropper.open {
         let count = templates.templates.len();
         if count != 0 {
@@ -550,8 +566,22 @@ fn run(
     let id = template.id.clone();
     let root = skater.animated_skeleton.roots.animation_to_world;
     let position = Vec3::from_slice(&root[3][..3]);
-    let mut forward = Vec3::new(root[2][0], 0., root[2][2]);
-    forward = forward.try_normalize().unwrap_or(Vec3::Z);
+    // Spawn in front of the player. The gameplay camera looks from behind the
+    // skater, so its horizontal forward points past them into the world. Fall
+    // back to the inverted animation root because the raw root row is the
+    // skater's back axis.
+    let forward = camera
+        .iter()
+        .next()
+        .and_then(|camera| {
+            let forward = *camera.forward();
+            Vec3::new(forward.x, 0., forward.z).try_normalize()
+        })
+        .unwrap_or_else(|| {
+            let mut fallback = Vec3::new(root[2][0], 0., root[2][2]);
+            fallback = fallback.try_normalize().unwrap_or(Vec3::Z);
+            -fallback
+        });
     let target = position + forward * PLACE_DISTANCE;
     let ground = ground_height(&physics, target.x, position.y, target.z);
     let transform = Transform {

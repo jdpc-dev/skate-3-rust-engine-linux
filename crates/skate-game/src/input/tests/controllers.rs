@@ -60,6 +60,23 @@ fn object_dropper_maps_lb_held_b_press_and_navigation_slots() {
 }
 
 #[test]
+fn gameplay_suppression_blocks_buttons_but_keeps_the_stick_live() {
+    let mut input = ControllerInput::default();
+    let state = || XboxState {
+        buttons: 0x1000,
+        triggers: [0; 2],
+        left: [32767, 0],
+        right: [0; 2],
+    };
+    input.sample_raw_for_test(state());
+    assert_eq!(input.mapped_actions[0][16], 1.0); // A
+    input.suppress_gameplay = true;
+    input.sample_raw_for_test(state());
+    assert_eq!(input.mapped_actions[0][16], 0.0); // A blocked
+    assert!((input.mapped_actions[0][0] - 1.0).abs() < 0.01); // left stick live
+}
+
+#[test]
 fn raw_packets_reach_stock_actions_without_losing_device_identity() {
     let mut input = ControllerInput::default();
     input.collect([
