@@ -36,6 +36,10 @@ impl MotionChannels {
             .iter()
             .any(|c| intent_key(&c.name) == intent_key(name))
     }
+    /// TEMPORARY diagnostics: every live channel name in evaluation order.
+    pub fn names(&self) -> Vec<&str> {
+        self.channels.iter().map(|c| c.name.as_str()).collect()
+    }
     ///82D1D5F8: missing channel returns zero; clamp remaining child time.
     pub fn remaining(&self, name: &str) -> f32 {
         self.channels

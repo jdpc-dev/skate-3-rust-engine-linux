@@ -97,6 +97,7 @@ pub(crate) fn launch_input(
         },
         elapsed_2664: p.state_timer_2664,
         skeleton_point_10960: skater.animated_skeleton.record.centre_of_mass,
+        drop_in: p.flags_2488 & 0x1000_0000 != 0,
     })
 }
 

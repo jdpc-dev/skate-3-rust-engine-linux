@@ -240,6 +240,14 @@ impl SkaterAnimation {
         if !self.motion.errors.is_empty() {
             return Err(self.motion.errors.join("\n"));
         }
+        // An arm overlay outlives its CharacterGesture owner only while that
+        // owner is active in the graph; otherwise it must not keep posing.
+        let gesture_active = self
+            .motion_controller
+            .active
+            .iter()
+            .any(|active| self.motion.behavior_is_character_gesture(active.behavior));
+        self.motion.trim_gesture_channels(gesture_active);
         self.state.flags = self
             .motion
             .animation

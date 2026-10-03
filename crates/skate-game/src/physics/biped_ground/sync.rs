@@ -7,6 +7,8 @@ pub(crate) struct LaunchInput {
     pub processed: air_launch::Processed,
     pub elapsed_2664: f32,
     pub skeleton_point_10960: Vector,
+    /// Mount drop-in owns this transition (Processed2488 bit28).
+    pub drop_in: bool,
 }
 impl Owner {
     ///82D32338. This writes state146 on every call, including the no-launch path.
@@ -19,10 +21,17 @@ impl Owner {
             .ok_or("Ground Sync requires completed Ground job")?;
         let p = &input.processed;
         let flags = self.contact.flags_176;
+        // The Mount drop-in owns this transition: the board mounts and rides the
+        // transition rather than the biped launching off the edge. Suppress the
+        // off-board air launch while OB_DropIn (Processed2488 bit28) is set.
+        let drop_in = input.drop_in;
         let mut launch = flags & 1 == 0 && input.elapsed_2664 > f32::from_bits(0x3d4ccccd);
         launch |= motion.alternate;
         if flags & 8 == 0 && p.flags_2480 & 0x20180 == 0 && !self.ground.flags_144_to_150[6] {
             launch |= p.flags_2476 & 0x80000 != 0;
+        }
+        if drop_in {
+            launch = false;
         }
         self.ground.flags_144_to_150[2] = launch;
         if !launch {
