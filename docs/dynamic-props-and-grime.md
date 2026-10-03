@@ -116,9 +116,13 @@ They remain explicit unresolved records; no substitute geometry is invented.
 
 Runtime loads private/native-props presentation supplements alongside the
 existing backdrop packages. This restores visible initial placement only:
-objects are not yet pushable, droppable or collidable. Their current materials
-use the existing PBR fallback, not the native dynamicobject lighting shader.
-No static district collision, gameplay or animation logic was changed.
+objects are not yet pushable, droppable or collidable. Authored
+`dynamicobject.*` materials now run through the retail world shader's general
+branch (family 0), which lights them with diffuse/normal and the fixed authored
+sun direction. This is a host lighting choice, not a recovered native
+dynamicobject shader; the previous PBR fallback was left with almost no
+directional energy on retail maps and read as unlit. No static district
+collision, gameplay or animation logic was changed.
 
 A separate host feature, the Object Dropper, can now instantiate authored DMO
 templates and add static contact geometry for them. It does not make the
