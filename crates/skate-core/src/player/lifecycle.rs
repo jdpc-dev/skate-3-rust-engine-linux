@@ -199,7 +199,11 @@ fn prepare_skateboard_controller<C: SkateboardControllerActions>(
             actions.let_go_of_skateboard();
             controller.state_448 = 2;
         }
-    } else if controller.state_448 != 1 {
+    } else {
+        // Re-seat the board in the hand even when a stale held state survived a
+        // mount (system off, state_448==1). Re-holding refreshes the hand drive
+        // frames; skipping it leaves the board on an invisible spring after a
+        // drop-in dismount until the player releases and re-grabs the board.
         actions.hold_skateboard();
         controller.state_448 = 1;
     }
