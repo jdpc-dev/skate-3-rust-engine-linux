@@ -86,5 +86,9 @@ pub fn update(state: &mut GroundMotionState, input: &GroundMotionInput) {
     state.frame_0[2] = normalize(cross(state.frame_0[0], input.desired_up_544));
     state.frame_0 = crate::physics::skeleton_root::orthonormalize(state.frame_0);
     state.frame_0[3] = add(old_position, displacement);
+    // Keep the geometric homogeneous lane at zero. Feeding a nonzero W through
+    // the support-velocity predictor is an unstable recurrence that diverges to
+    // inf/NaN and poisons later grab queries.
+    state.frame_0[3][3] = 0.0;
     publication::update(state, displacement);
 }

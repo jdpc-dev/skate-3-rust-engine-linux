@@ -19,16 +19,21 @@ Recording uses completed physical publications, not render transforms or a
 last-grounded shortcut. It requires 120 empirical measurements, more than the
 stock 15 frames in an eligible state, expired 20-update cooldown, and at least
 1.5 units from every recorded position. The ring retains 32 entries. Surface
-categories 5, 6, 9, 12 and 13 are excluded; category 8 requests offboard recovery.
+categories 5, 6, 9, 12 and 13 are excluded; category 8 records an offboard
+candidate. The host reply now ignores that recorded byte and always recovers
+off-board.
 Scores are 100 for categories 1/2, 50 for 3/4, 20 for 11 and zero otherwise. The
 newest entry receives a 100-point penalty and entries older than five receive a
 200-point penalty; newest wins ties.
 
 The selected position, heading, stance and offboard byte go through the existing
-State702 request/reply publication boundary. Selection does not reset physical
-bodies. Existing wipeout timers, recovery countdown, physical reset and ragdoll
-restoration remain in place. The explicit fixed-checkpoint helper used by the
-existing manual test remains separate from automatic selection.
+State702 request/reply publication boundary. Automatic recovery always replies
+off-board (`on_board=false`), so the skater reappears on foot holding the board
+in hand rather than riding the restored deck; entering BipedGround re-holds the
+board through the ordinary controller lifecycle. Selection does not reset
+physical bodies. Existing wipeout timers, recovery countdown, physical reset and
+ragdoll restoration remain in place. The explicit fixed-checkpoint helper used by
+the existing manual test remains separate from automatic selection.
 
 ## Native evidence
 
@@ -62,6 +67,10 @@ inverting X/Z, plus 0.2 Y. Above speed squared 0.25, a velocity-derived upright
 basis is accepted only when projected forward length squared exceeds 0.9.
 Offboard checkpoints use the animation-to-world frame with Processed2476 bit2
 inverting X/Z; the native function returns before the velocity-heading branch.
+Because recovery always returns off-board, the skater spends real time in the
+Biped ground integrator. Its geometric homogeneous lane is now pinned to zero:
+feeding a nonzero W through the support-velocity predictor was an unstable
+recurrence that grew to inf/NaN and later poisoned the grab query.
 
 Current position is Skeleton64 (physical COM16144); spacing uses Skeleton416,
 the unmirrored animation-to-world translation. OffBoard333 comes from the
