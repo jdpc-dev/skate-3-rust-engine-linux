@@ -582,6 +582,105 @@ mod performance_inventory {
     }
 }
 
+/// Shared authored-texture upload. `role`: 0 albedo, 1 lightmap float, 2 data,
+/// 3 repeat data, 4 clamp data, 5 cube reflection, 6 decal clamp.
+fn map_texture(
+    map: &SkateMap,
+    texture_ids: &[u32],
+    texture_scale: u32,
+    cache: &mut HashMap<(u32, u8), Handle<Image>>,
+    images: &mut impl crate::map_render::AssetSink<Image>,
+    id: u32,
+    role: u8,
+) -> Option<Handle<Image>> {
+    let id = texture_ids[id as usize];
+    if id == 0 {
+        return None;
+    }
+    if role == 5 && map.textures[id as usize - 1].height != map.textures[id as usize - 1].width * 6 {
+        // Older .skate exports contain only face zero. Never treat it as a cube.
+        return None;
+    }
+    Some(
+        cache
+            .entry((id, role))
+            .or_insert_with(|| {
+                let source = &map.textures[id as usize - 1];
+                let cube = role == 5;
+                // Low-end option halves D2 textures before upload. Cube faces
+                // keep their authored atlas; collision never reads textures.
+                let downscale = texture_scale <= 50
+                    && !cube
+                    && source.width >= 4
+                    && source.height >= 4;
+                let (width, height) = if downscale {
+                    (source.width / 2, source.height / 2)
+                } else {
+                    (source.width, source.height)
+                };
+                let downsampled = downscale.then(|| {
+                    crate::retail_render::downsample_half(&source.rgba, source.width, source.height)
+                });
+                let rgba: &[u8] = downsampled.as_deref().unwrap_or(&source.rgba);
+                let (format, bytes) = if role == 1 {
+                    let mut bytes = Vec::with_capacity(rgba.len() * 2);
+                    for pixel in rgba.chunks_exact(4) {
+                        for (i, &byte) in pixel.iter().enumerate() {
+                            let v = f32::from(byte) / 255.;
+                            let linear = if i == 3 { 1. } else { v * v * 4. };
+                            bytes.extend_from_slice(&half::f16::from_f32(linear).to_le_bytes());
+                        }
+                    }
+                    (TextureFormat::Rgba16Float, bytes)
+                } else {
+                    let srgb =
+                        role == 0 && source.color_space == 1 && !(2..=3).contains(&map.version);
+                    (
+                        if srgb {
+                            TextureFormat::Rgba8UnormSrgb
+                        } else {
+                            TextureFormat::Rgba8Unorm
+                        },
+                        rgba.to_vec(),
+                    )
+                };
+                let face_height = if cube { source.height / 6 } else { height };
+                let layers = if cube { 6 } else { 1 };
+                let mut image = Image::new(
+                    Extent3d {
+                        width,
+                        height: face_height,
+                        depth_or_array_layers: layers,
+                    },
+                    TextureDimension::D2,
+                    bytes,
+                    format,
+                    RenderAssetUsages::RENDER_WORLD,
+                );
+                // Albedo and data roles keep a mip chain; it reduces
+                // minification aliasing and texture-cache pressure.
+                if role == 0 || role == 3 || role == 6 || cube {
+                    let (bytes, levels) = crate::retail_render::mip_chain(rgba, width, face_height, layers);
+                    image.data = Some(bytes);
+                    image.texture_descriptor.mip_level_count = levels;
+                }
+                if cube {
+                    image.texture_view_descriptor = Some(bevy::render::render_resource::TextureViewDescriptor {
+                        dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube), ..default()
+                    });
+                }
+                let mut sampler = bevy::image::ImageSamplerDescriptor::linear();
+                if role != 1 && role != 4 && role != 6 && !cube {
+                    sampler.address_mode_u = bevy::image::ImageAddressMode::Repeat;
+                    sampler.address_mode_v = bevy::image::ImageAddressMode::Repeat;
+                }
+                image.sampler = ImageSampler::Descriptor(sampler);
+                images.add(image)
+            })
+            .clone(),
+    )
+}
+
 pub(crate) fn spawn(
     map: &SkateMap,
     commands: &mut crate::map_render::SceneCommands,
@@ -596,93 +695,8 @@ pub(crate) fn spawn(
     let _span = info_span!("prepare_map_geometry_and_textures").entered();
     let texture_ids = render_texture_ids(&map.textures);
     let mut cache = HashMap::<(u32, u8), Handle<Image>>::new();
-    let mut texture = |id: u32, role: u8| -> Option<Handle<Image>> {
-        let id = texture_ids[id as usize];
-        if id == 0 {
-            return None;
-        }
-        if role == 5 && map.textures[id as usize - 1].height != map.textures[id as usize - 1].width * 6 {
-            // Older .skate exports contain only face zero. Never treat it as a cube.
-            return None;
-        }
-        Some(
-            cache
-                .entry((id, role))
-                .or_insert_with(|| {
-                    let source = &map.textures[id as usize - 1];
-                    let cube = role == 5;
-                    // Low-end option halves D2 textures before upload. Cube faces
-                    // keep their authored atlas; collision never reads textures.
-                    let downscale = texture_scale <= 50
-                        && !cube
-                        && source.width >= 4
-                        && source.height >= 4;
-                    let (width, height) = if downscale {
-                        (source.width / 2, source.height / 2)
-                    } else {
-                        (source.width, source.height)
-                    };
-                    let downsampled = downscale.then(|| {
-                        crate::retail_render::downsample_half(&source.rgba, source.width, source.height)
-                    });
-                    let rgba: &[u8] = downsampled.as_deref().unwrap_or(&source.rgba);
-                    let (format, bytes) = if role == 1 {
-                        let mut bytes = Vec::with_capacity(rgba.len() * 2);
-                        for pixel in rgba.chunks_exact(4) {
-                            for (i, &byte) in pixel.iter().enumerate() {
-                                let v = f32::from(byte) / 255.;
-                                let linear = if i == 3 { 1. } else { v * v * 4. };
-                                bytes.extend_from_slice(&half::f16::from_f32(linear).to_le_bytes());
-                            }
-                        }
-                        (TextureFormat::Rgba16Float, bytes)
-                    } else {
-                        let srgb =
-                            role == 0 && source.color_space == 1 && !(2..=3).contains(&map.version);
-                        (
-                            if srgb {
-                                TextureFormat::Rgba8UnormSrgb
-                            } else {
-                                TextureFormat::Rgba8Unorm
-                            },
-                            rgba.to_vec(),
-                        )
-                    };
-                    let face_height = if cube { source.height / 6 } else { height };
-                    let layers = if cube { 6 } else { 1 };
-                    let mut image = Image::new(
-                        Extent3d {
-                            width,
-                            height: face_height,
-                            depth_or_array_layers: layers,
-                        },
-                        TextureDimension::D2,
-                        bytes,
-                        format,
-                        RenderAssetUsages::RENDER_WORLD,
-                    );
-                    // Albedo and data roles keep a mip chain; it reduces
-                    // minification aliasing and texture-cache pressure.
-                    if role == 0 || role == 3 || role == 6 || cube {
-                        let (bytes, levels) = crate::retail_render::mip_chain(rgba, width, face_height, layers);
-                        image.data = Some(bytes);
-                        image.texture_descriptor.mip_level_count = levels;
-                    }
-                    if cube {
-                        image.texture_view_descriptor = Some(bevy::render::render_resource::TextureViewDescriptor {
-                            dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube), ..default()
-                        });
-                    }
-                    let mut sampler = bevy::image::ImageSamplerDescriptor::linear();
-                    if role != 1 && role != 4 && role != 6 && !cube {
-                        sampler.address_mode_u = bevy::image::ImageAddressMode::Repeat;
-                        sampler.address_mode_v = bevy::image::ImageAddressMode::Repeat;
-                    }
-                    image.sampler = ImageSampler::Descriptor(sampler);
-                    images.add(image)
-                })
-                .clone(),
-        )
+    let mut texture = |id: u32, role: u8| {
+        map_texture(map, &texture_ids, texture_scale, &mut cache, images, id, role)
     };
     // Lightmaps belong to mesh entities, not StandardMaterial. Distinct baked
     // lighting still needs separate geometry batches but can share a PBR material.
@@ -697,98 +711,16 @@ pub(crate) fn spawn(
         vec![None; map.materials.len()];
     for RenderGroup { material: material_index, indices, retail } in groups {
         let m = &map.materials[material_index];
-        // Reindex each batch, preserving authored normals and both UV sets.
-        let mut remap = HashMap::new();
-        let mut vertices = Vec::new();
-        let local: Vec<u32> = indices
-            .into_iter()
-            .map(|index| {
-                *remap.entry(index).or_insert_with(|| {
-                    let id = vertices.len() as u32;
-                    vertices.push(&map.geometry.vertices[index as usize]);
-                    id
-                })
-            })
-            .collect();
-        let mut mesh = Mesh::new(
-            bevy::mesh::PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_NORMAL,
-            vertices.iter().map(|v| v.normal).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            vertices.iter().map(|v| v.uv).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_UV_1,
-            vertices.iter().map(|v| v.lightmap_uv).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_COLOR,
-            vertices.iter().map(|v| { let uv = v.decal_uv.unwrap_or(v.uv); [uv[0], uv[1], 0., 1.] }).collect::<Vec<_>>(),
-        )
-        .with_inserted_indices(bevy::mesh::Indices::U32(local));
-        if vertices.iter().all(|v| v.tangent_frame.is_some()) {
-            let tangents: Vec<[f32; 4]> = vertices
-                .iter()
-                .map(|v| {
-                    let frame = v
-                        .tangent_frame
-                        .unwrap()
-                        .map(|b| (b as i8 as f32 / 127.).max(-1.));
-                    let binormal = Vec3::new(frame[0], frame[1], frame[2]);
-                    let tangent = binormal.cross(Vec3::from_array(v.normal)) * frame[3];
-                    [tangent.x, tangent.y, tangent.z, frame[3]]
-                })
-                .collect();
-            mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tangents);
-        } else if m.textures[2] != 0 {
-            if let Err(error) = mesh.generate_tangents() {
-                warn!("SKATE material {} tangent generation: {error}", m.name);
-            }
-        }
-        // Static identity transforms, so world bounds equal the local bounds.
-        let bounds = MapBatchBounds::from_vertices(vertices.iter().map(|v| v.position));
+        let (mut mesh, bounds) = render_group_mesh(map, m, indices);
         if let Some(material) = retail {
             let material = retail_materials.add(material);
             commands.spawn((Name::new(m.name.clone()), Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default(), bounds));
             continue;
         }
-        // Vertex colours above carry retail decal coordinates, never PBR tint.
+        // Vertex colours carry retail decal coordinates, never PBR tint.
         mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR);
         let material = material_handles[pbr_ids[material_index]]
-            .get_or_insert_with(|| {
-                let orm = texture(m.textures[3], 2);
-                materials.add(StandardMaterial {
-                    base_color: Color::linear_rgb(m.color[0], m.color[1], m.color[2]),
-                    base_color_texture: texture(m.textures[0], 0),
-                    normal_map_texture: texture(m.textures[2], 2),
-                    metallic_roughness_texture: orm.clone(),
-                    occlusion_texture: orm,
-                    metallic: if m.textures[3] != 0 { 1. } else { 0. },
-                    perceptual_roughness: m.roughness,
-                    emissive: LinearRgba::rgb(
-                        m.color[0] * m.emissive,
-                        m.color[1] * m.emissive,
-                        m.color[2] * m.emissive,
-                    ),
-                    emissive_texture: texture(m.textures[4], 0),
-                    alpha_mode: match m.alpha_mode {
-                        1 => AlphaMode::Mask(m.alpha_cutoff),
-                        2 => AlphaMode::Blend,
-                        _ => AlphaMode::Opaque,
-                    },
-                    lightmap_exposure: m.indirect_strength,
-                    ..default()
-                })
-            })
+            .get_or_insert_with(|| materials.add(standard_material(m, &mut texture)))
             .clone();
         let mut entity = commands.spawn((
             Name::new(m.name.clone()),
@@ -851,6 +783,151 @@ pub(crate) fn spawn(
         map.geometry.indices.len() / 3,
         map.geometry.collision.len()
     );
+}
+
+/// Reindex one material batch, preserving authored normals, both UV sets,
+/// decal coordinates and explicit tangent frames.
+fn render_group_mesh(
+    map: &SkateMap,
+    m: &skate_data::skate_map::Material,
+    indices: Vec<u32>,
+) -> (Mesh, MapBatchBounds) {
+    let mut remap = HashMap::new();
+    let mut vertices = Vec::new();
+    let local: Vec<u32> = indices
+        .into_iter()
+        .map(|index| {
+            *remap.entry(index).or_insert_with(|| {
+                let id = vertices.len() as u32;
+                vertices.push(&map.geometry.vertices[index as usize]);
+                id
+            })
+        })
+        .collect();
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vertices.iter().map(|v| v.normal).collect::<Vec<_>>(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vertices.iter().map(|v| v.uv).collect::<Vec<_>>(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_UV_1,
+        vertices.iter().map(|v| v.lightmap_uv).collect::<Vec<_>>(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vertices
+            .iter()
+            .map(|v| {
+                let uv = v.decal_uv.unwrap_or(v.uv);
+                [uv[0], uv[1], 0., 1.]
+            })
+            .collect::<Vec<_>>(),
+    )
+    .with_inserted_indices(bevy::mesh::Indices::U32(local));
+    if vertices.iter().all(|v| v.tangent_frame.is_some()) {
+        let tangents: Vec<[f32; 4]> = vertices
+            .iter()
+            .map(|v| {
+                let frame = v.tangent_frame.unwrap().map(|b| (b as i8 as f32 / 127.).max(-1.));
+                let binormal = Vec3::new(frame[0], frame[1], frame[2]);
+                let tangent = binormal.cross(Vec3::from_array(v.normal)) * frame[3];
+                [tangent.x, tangent.y, tangent.z, frame[3]]
+            })
+            .collect();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tangents);
+    } else if m.textures[2] != 0 {
+        if let Err(error) = mesh.generate_tangents() {
+            warn!("SKATE material {} tangent generation: {error}", m.name);
+        }
+    }
+    let bounds = MapBatchBounds::from_vertices(vertices.iter().map(|v| v.position));
+    (mesh, bounds)
+}
+
+/// Portable PBR fallback identical to the map path (normal + ORM + emissive).
+fn standard_material(
+    m: &skate_data::skate_map::Material,
+    texture: &mut impl FnMut(u32, u8) -> Option<Handle<Image>>,
+) -> StandardMaterial {
+    let orm = texture(m.textures[3], 2);
+    StandardMaterial {
+        base_color: Color::linear_rgb(m.color[0], m.color[1], m.color[2]),
+        base_color_texture: texture(m.textures[0], 0),
+        normal_map_texture: texture(m.textures[2], 2),
+        metallic_roughness_texture: orm.clone(),
+        occlusion_texture: orm,
+        metallic: if m.textures[3] != 0 { 1. } else { 0. },
+        perceptual_roughness: m.roughness,
+        emissive: LinearRgba::rgb(
+            m.color[0] * m.emissive,
+            m.color[1] * m.emissive,
+            m.color[2] * m.emissive,
+        ),
+        emissive_texture: texture(m.textures[4], 0),
+        alpha_mode: match m.alpha_mode {
+            1 => AlphaMode::Mask(m.alpha_cutoff),
+            2 => AlphaMode::Blend,
+            _ => AlphaMode::Opaque,
+        },
+        lightmap_exposure: m.indirect_strength,
+        ..default()
+    }
+}
+
+/// Material selected for a host-placed object batch.
+pub(crate) enum ObjectMaterial {
+    Retail(Handle<crate::retail_render::RetailWorldMaterial>),
+    Standard(Handle<StandardMaterial>),
+}
+
+/// Build reusable render batches for one render-only object template. Reuses the
+/// exact map grouping and material builders so dropped props match the world's
+/// retail/PBR treatment instead of a hand-built approximation.
+pub(crate) fn object_assets(
+    map: &SkateMap,
+    tuning: &crate::retail_render::MaterialTuning,
+    texture_scale: u32,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    retail_materials: &mut Assets<crate::retail_render::RetailWorldMaterial>,
+    images: &mut Assets<Image>,
+) -> Vec<(Handle<Mesh>, ObjectMaterial)> {
+    let texture_ids = render_texture_ids(&map.textures);
+    let mut cache = HashMap::<(u32, u8), Handle<Image>>::new();
+    let mut texture = |id: u32, role: u8| {
+        map_texture(map, &texture_ids, texture_scale, &mut cache, images, id, role)
+    };
+    let groups = consolidated_groups(map, &texture_ids, tuning, &mut texture);
+    let mut out = Vec::with_capacity(groups.len());
+    for RenderGroup { material: material_index, indices, retail } in groups {
+        let m = &map.materials[material_index];
+        let (mut mesh, _) = render_group_mesh(map, m, indices);
+        match retail {
+            Some(material) => out.push((
+                meshes.add(mesh),
+                ObjectMaterial::Retail(retail_materials.add(material)),
+            )),
+            None => {
+                mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR);
+                out.push((
+                    meshes.add(mesh),
+                    ObjectMaterial::Standard(materials.add(standard_material(m, &mut texture))),
+                ));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

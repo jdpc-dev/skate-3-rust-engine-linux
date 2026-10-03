@@ -23,8 +23,15 @@ props are kept; placing beyond the cap removes the oldest.
 
 ## Placement and collision
 
-Props come from authored DMO templates already extracted for the map. Placed
-props spawn a render entity and append their **render-mesh triangles** to the
+Props come from authored DMO templates already extracted for the map. Their
+render batches are built by the same map grouping and material code as the
+world (`skate_world::object_assets`), so retail-family materials use the retail
+world shader and the rest use the world's PBR fallback (diffuse, normal, ORM,
+emissive and lightmap exposure) rather than a hand-built material. The native
+`dynamicobject.default` shader has no family mapping and therefore uses the PBR
+fallback, matching the authored `native-props` supplement.
+
+Placed props spawn a render entity and append their **render-mesh triangles** to the
 live `BoardWorld` as static ground geometry, so the skater can land on them. The
 packed surface code is taken from the template material's authored
 `audio | physics<<7 | pattern<<12` value, matching the portable map path.

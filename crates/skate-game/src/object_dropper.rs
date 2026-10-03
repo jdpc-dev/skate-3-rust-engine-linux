@@ -5,12 +5,7 @@
 //! catalog, contact triangles and placement rules are not recovered native
 //! Object Dropper behaviour. Placed objects are static; they are not movable
 //! DMO simulation bodies. See `docs/object-dropper.md`.
-use bevy::{
-    asset::RenderAssetUsages,
-    image::ImageSampler,
-    prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-};
+use bevy::prelude::*;
 use serde::Deserialize;
 use skate_core::{
     math::Vector3,
@@ -18,7 +13,7 @@ use skate_core::{
         board_world::WorldTriangle, collision::TriangleFeature, contact::RetailContactMaterial,
     },
 };
-use skate_data::skate_map::{SkateMap, Texture};
+use skate_data::skate_map::SkateMap;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -31,6 +26,7 @@ use crate::{
     map_transition::{CurrentMap, MapTransition},
     physics::{GamePhysics, SkaterRuntime},
     replay::Replay,
+    skate_world::ObjectMaterial,
 };
 
 const PLACED_CAP: usize = 32;
@@ -63,9 +59,23 @@ pub(crate) struct PropTemplate {
 }
 
 pub(crate) struct PropAsset {
-    meshes: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    meshes: Vec<(Handle<Mesh>, ObjectMaterial)>,
     /// Local-space contact triangles with the packed authored surface code.
     collision: Vec<([Vector3; 3], u16)>,
+}
+
+/// Retail material tuning used to build object materials exactly like the map.
+#[derive(Resource, Default)]
+pub(crate) struct DropperTuning(pub(crate) crate::retail_render::MaterialTuning);
+
+/// Asset banks shared by preview and placement. Bundled to keep the dropper
+/// system within Bevy's system-parameter arity limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct DropperAssets<'w> {
+    pub(crate) meshes: ResMut<'w, Assets<Mesh>>,
+    pub(crate) materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub(crate) retail: ResMut<'w, Assets<crate::retail_render::RetailWorldMaterial>>,
+    pub(crate) images: ResMut<'w, Assets<Image>>,
 }
 
 #[derive(Resource)]
@@ -113,6 +123,7 @@ impl Plugin for ObjectDropperPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PropTemplates>()
             .init_resource::<Dropper>()
+            .init_resource::<DropperTuning>()
             .add_systems(PreUpdate, refresh)
             // Use the same per-frame menu navigation the travel menu uses: it
             // edge-detects the raw pad in PreUpdate, so it does not race the
@@ -167,10 +178,12 @@ fn refresh(
     config: Res<Config>,
     mut templates: ResMut<PropTemplates>,
     mut dropper: ResMut<Dropper>,
+    mut tuning: ResMut<DropperTuning>,
 ) {
     if templates.generation == map.generation {
         return;
     }
+    tuning.0 = crate::retail_render::MaterialTuning::load(&config.asset_root);
     templates.generation = map.generation;
     templates.map = map.name.clone();
     templates.templates.clear();
@@ -210,96 +223,6 @@ fn refresh(
     }
 }
 
-fn texture_handle(texture: &Texture, images: &mut Assets<Image>) -> Handle<Image> {
-    let mut image = Image::new(
-        Extent3d {
-            width: texture.width.max(1),
-            height: texture.height.max(1),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        texture.rgba.clone(),
-        if texture.color_space == 1 {
-            TextureFormat::Rgba8UnormSrgb
-        } else {
-            TextureFormat::Rgba8Unorm
-        },
-        RenderAssetUsages::default(),
-    );
-    image.sampler = ImageSampler::linear();
-    images.add(image)
-}
-
-fn build_meshes(
-    map: &SkateMap,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>)> {
-    let mut groups: HashMap<u32, Vec<u32>> = HashMap::new();
-    for face in map.geometry.indices.chunks_exact(3) {
-        let material = map.geometry.vertices[face[0] as usize].material;
-        groups
-            .entry(material)
-            .or_default()
-            .extend_from_slice(face);
-    }
-    let mut out = Vec::with_capacity(groups.len());
-    for (material_index, indices) in groups {
-        let mut remap = HashMap::new();
-        let mut vertices = Vec::new();
-        let local: Vec<u32> = indices
-            .into_iter()
-            .map(|index| {
-                *remap.entry(index).or_insert_with(|| {
-                    let id = vertices.len() as u32;
-                    vertices.push(&map.geometry.vertices[index as usize]);
-                    id
-                })
-            })
-            .collect();
-        let mesh = Mesh::new(
-            bevy::mesh::PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_NORMAL,
-            vertices.iter().map(|v| v.normal).collect::<Vec<_>>(),
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            vertices.iter().map(|v| v.uv).collect::<Vec<_>>(),
-        )
-        .with_inserted_indices(bevy::mesh::Indices::U32(local));
-        let source = (material_index as usize)
-            .checked_sub(1)
-            .and_then(|index| map.materials.get(index));
-        let base_texture = source
-            .and_then(|m| m.textures[0].checked_sub(1))
-            .and_then(|i| map.textures.get(i as usize))
-            .map(|t| texture_handle(t, images));
-        let material = StandardMaterial {
-            base_color: source
-                .map(|m| Color::srgb(m.color[0], m.color[1], m.color[2]))
-                .unwrap_or(Color::WHITE),
-            base_color_texture: base_texture,
-            perceptual_roughness: source.map(|m| m.roughness).unwrap_or(0.8),
-            alpha_mode: match source.map(|m| m.alpha_mode) {
-                Some(1) => AlphaMode::Mask(0.5),
-                Some(2) => AlphaMode::Blend,
-                _ => AlphaMode::Opaque,
-            },
-            ..default()
-        };
-        out.push((meshes.add(mesh), materials.add(material)));
-    }
-    out
-}
-
 fn build_collision(map: &SkateMap) -> Vec<([Vector3; 3], u16)> {
     let mut out = Vec::with_capacity(map.geometry.indices.len() / 3);
     for face in map.geometry.indices.chunks_exact(3) {
@@ -318,11 +241,14 @@ fn build_collision(map: &SkateMap) -> Vec<([Vector3; 3], u16)> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_asset(
     templates: &mut PropTemplates,
+    tuning: &crate::retail_render::MaterialTuning,
     id: &str,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    retail_materials: &mut Assets<crate::retail_render::RetailWorldMaterial>,
     images: &mut Assets<Image>,
 ) -> Result<Arc<PropAsset>, String> {
     if let Some(asset) = templates.loaded.get(id) {
@@ -339,7 +265,15 @@ fn load_asset(
         return Err("Object template has no geometry".into());
     }
     let asset = Arc::new(PropAsset {
-        meshes: build_meshes(&map, meshes, materials, images),
+        meshes: crate::skate_world::object_assets(
+            &map,
+            tuning,
+            100,
+            meshes,
+            materials,
+            retail_materials,
+            images,
+        ),
         collision: build_collision(&map),
     });
     templates.loaded.insert(id.to_owned(), asset.clone());
@@ -351,7 +285,14 @@ fn spawn_prop(commands: &mut Commands, asset: &PropAsset, transform: Transform) 
         .spawn(transform)
         .with_children(|parent| {
             for (mesh, material) in &asset.meshes {
-                parent.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+                match material {
+                    ObjectMaterial::Retail(material) => {
+                        parent.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+                    }
+                    ObjectMaterial::Standard(material) => {
+                        parent.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+                    }
+                }
             }
         })
         .id()
@@ -426,9 +367,8 @@ fn run(
     replay: Res<Replay>,
     transition: Res<MapTransition>,
     menu: Res<crate::graphics_menu::Menu>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut assets: DropperAssets,
+    tuning: Res<DropperTuning>,
     mut preview_query: Query<&mut Transform, Without<DropperRoot>>,
     mut toggle_prev: Local<bool>,
 ) {
@@ -540,7 +480,7 @@ fn run(
         if let Some(entity) = dropper.preview.take() {
             commands.entity(entity).despawn();
         }
-        match load_asset(&mut templates, &id, &mut meshes, &mut materials, &mut images) {
+        match load_asset(&mut templates, &tuning.0, &id, &mut assets.meshes, &mut assets.materials, &mut assets.retail, &mut assets.images) {
             Ok(asset) => {
                 dropper.preview = Some(spawn_prop(&mut commands, &asset, transform));
                 dropper.preview_id = Some(id.clone());
@@ -560,7 +500,7 @@ fn run(
     }
     let asset = match templates.loaded.get(&id).cloned() {
         Some(asset) => asset,
-        None => match load_asset(&mut templates, &id, &mut meshes, &mut materials, &mut images) {
+        None => match load_asset(&mut templates, &tuning.0, &id, &mut assets.meshes, &mut assets.materials, &mut assets.retail, &mut assets.images) {
             Ok(asset) => asset,
             Err(e) => {
                 warn!("Object dropper template {id}: {e}");
