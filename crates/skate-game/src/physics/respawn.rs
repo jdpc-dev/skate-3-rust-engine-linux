@@ -63,16 +63,17 @@ pub(super) fn request(physics: &GamePhysics, skater: &mut SkaterRuntime) -> Resu
         },
     )?;
     skater.animation.request_checkpoint_stance(candidate.stance);
+    // Recovery always returns the skater on foot holding the board, never
+    // riding a restored deck, regardless of the recorded surface category.
     skater.teleport_state.reply(Checkpoint {
         transform: candidate.transform,
-        on_board: !candidate.offboard,
+        on_board: false,
     });
     bevy::log::info!(
-        "BAIL_CHECKPOINT position={:?} heading={:?} stance={} offboard={} score={}",
+        "BAIL_CHECKPOINT position={:?} heading={:?} stance={} offboard=true score={}",
         candidate.transform[3],
         candidate.transform[2],
         candidate.stance,
-        candidate.offboard,
         candidate.score
     );
     Ok(())

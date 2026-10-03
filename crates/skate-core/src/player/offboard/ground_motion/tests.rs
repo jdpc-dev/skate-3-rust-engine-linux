@@ -68,6 +68,18 @@ fn free_step_combines_all_actual_displacements() {
     assert_eq!(s.frame_0, s.published_frame_64);
 }
 #[test]
+fn nonzero_homogeneous_lane_does_not_diverge_through_support_predictor() {
+    let mut s = state();
+    let mut i = input();
+    i.contact_flags_176 = 1;
+    s.frame_0[3] = [0.0, 0.0, 0.0, 1.0];
+    for _ in 0..256 {
+        update(&mut s, &i);
+        assert!(s.frame_0[3].iter().all(|value| value.is_finite()));
+        assert_eq!(s.frame_0[3][3], 0.0);
+    }
+}
+#[test]
 fn absent_contact_preserves_support_history() {
     let mut s = state();
     let i = input();
