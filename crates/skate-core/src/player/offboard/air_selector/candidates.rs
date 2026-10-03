@@ -1,23 +1,11 @@
 //!82D6BF90; S2 82DBB358 verifies packet/index-shift roles, not S3's new cone.
 use super::{Candidate, DT, MAX_CANDIDATES, Packet, Settings, Vector, math::*};
-use crate::player::offboard::air_launch::math::{sanitize_w_lane, xyz_finite};
 use crate::air::trajectory::Trajectory;
-fn sanitize_packet(mut p: Packet) -> Packet {
-    p.velocity_0 = sanitize_w_lane(p.velocity_0);
-    p.secondary_velocity_16 = sanitize_w_lane(p.secondary_velocity_16);
-    p.position_32 = sanitize_w_lane(p.position_32);
-    p.up_48 = sanitize_w_lane(p.up_48);
-    p.forward_64 = sanitize_w_lane(p.forward_64);
-    p.board_position_80 = sanitize_w_lane(p.board_position_80);
-    p
-}
 pub(super) fn prepare(
     p: Packet,
     gravity: Vector,
     s: Settings,
 ) -> Result<(Vec<Candidate>, Vector, Vector), &'static str> {
-    let p = sanitize_packet(p);
-    let gravity = sanitize_w_lane(gravity);
     let count = p
         .kind_108
         .checked_add(p.kind_112)
@@ -30,10 +18,14 @@ pub(super) fn prepare(
     {
         return Err("Invalid authored BipedAir selector settings");
     }
+    // The trajectory math only reads x,y,z; the native padding lane (w) may
+    // legitimately carry NaN from off-board animation/velocity sources and must
+    // not reject an otherwise finite launch.
+    let finite_xyz = |v: &Vector| v[..3].iter().all(|x| x.is_finite());
     if [p.scalar_96, p.scalar_100, p.scalar_104]
         .iter()
         .any(|x| !x.is_finite())
-        || ![
+        || [
             p.velocity_0,
             p.secondary_velocity_16,
             p.position_32,
@@ -43,7 +35,7 @@ pub(super) fn prepare(
             gravity,
         ]
         .iter()
-        .all(|v| xyz_finite(*v))
+        .any(|v| !finite_xyz(v))
     {
         return Err("Nonfinite BipedAir launch packet");
     }

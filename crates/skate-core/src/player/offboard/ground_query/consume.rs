@@ -12,7 +12,10 @@ pub fn interpret_hits(packet: &GroundQueryPacket, hits: [Option<LineHit>; 7]) ->
             cross(Vector3::new(0., 1., 0.), packet.tangent),
         )),
     );
-    let kind = if (h(0) && h(1)) || h(4) {
+    // A ledge keeps one near line over the drop and the other on the surface;
+    // the centre line also grazes the lip on sharp authored seams. Classify the
+    // one-sided case before the centre fallback so the ledge stays kind2.
+    let kind = if h(0) && h(1) {
         3
     } else if h(0) {
         if hits[2].is_some_and(|v| !(v.fraction >= 0.65)) {
@@ -27,6 +30,8 @@ pub fn interpret_hits(packet: &GroundQueryPacket, hits: [Option<LineHit>; 7]) ->
         } else {
             1
         }
+    } else if h(4) {
+        3
     } else {
         0
     };

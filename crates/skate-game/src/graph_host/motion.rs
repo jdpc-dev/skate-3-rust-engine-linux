@@ -202,6 +202,16 @@ impl MotionHost {
                 capabilities.unsupported_hooks.push(format!("{kind:?} `{name}`"));
             }
         }
+        // TEMPORARY drop-in diagnostics (SKATE3_DROPIN_TRACE): surface the nodes
+        // the stock MotionGraph cannot evaluate in this build.
+        if std::env::var_os("SKATE3_DROPIN_TRACE").is_some() {
+            eprintln!(
+                "MOTION_GRAPH_CAPABILITY unsupported_operations={:?} unsupported_conditions={:?} unsupported_hooks={:?}",
+                capabilities.unsupported_operations,
+                capabilities.unsupported_conditions,
+                capabilities.unsupported_hooks,
+            );
+        }
         // Preserve lazy diagnostics for optional unsupported graph branches.
         //8258F488 and final reset825953B0 explicitly zero the complete push
         //state; reset clears manualing and body-tilt flag bits too.

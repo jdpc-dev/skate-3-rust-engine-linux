@@ -1,8 +1,7 @@
 use super::*;
 use skate_core::player::offboard::ground_query::QueryContext;
 #[test]
-fn indexed_edges_sort_ids_and_preserve_shared_capacity() {
-    let bounds = Bounds {
+fn indexed_edges_sort_ids_and_preserve_shared_capacity() {    let bounds = Bounds {
         min: Vector3::new(-1., -1., -1.),
         max: Vector3::new(1., 1., 1.),
     };
@@ -193,7 +192,7 @@ fn canonical_world_bridge_requires_metadata_and_queries_authored_surfaces() {
             .query_lines(&packet()))
         .is_err()
     );
-    let world = BoardWorld::with_query_metadata(
+    let world = skate_core::physics::board_world::BoardWorld::with_query_metadata(
         vec![triangle(0.)],
         QueryMetadata {
             packed_surfaces: vec![0x400],
@@ -268,7 +267,7 @@ fn indexed_world_bridge_retains_group_pool_and_conditional_selection() {
     };
     for (flags, expected) in [(0, 101), (3, 102)] {
         metadata.island_flags = flags;
-        let world = BoardWorld::with_query_metadata(triangles.clone(), metadata.clone()).unwrap();
+        let world = skate_core::physics::board_world::BoardWorld::with_query_metadata(triangles.clone(), metadata.clone()).unwrap();
         let hits = with_world_scene(
             &world,
             PrimaryEdges::Normal {

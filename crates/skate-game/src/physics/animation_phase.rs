@@ -223,6 +223,8 @@ pub(crate) fn advance(
         feedback.crouching.animation_height_72,
         mirrored,
         physics.riding.motion.effective_basis.columns[2],
+        // Mount IntoDropIn/OutOfDropIn set OB_DropIn (Processed2488 bit28).
+        p.flags_2488 & 0x1000_0000 != 0,
     )?;
     let conditions = ConditionInputs {
         speeds: Some(physics.riding.graph_speeds()),

@@ -69,6 +69,7 @@ mod biped_air;
 mod known_air;
 mod landing_on_deck;
 mod offboard_audit_trace;
+mod drop_in_trace;
 use crate::{
     app::{FrameSet, SimulationSet},
     world::PlayerRoot,
