@@ -15,6 +15,10 @@ TU3 image: default_82000000_011B0000.bin, SHA256 f4aa113eb541bfba03dbc108cf5ab43
 - 82BAF208, 82BB0A30, 82BB0D40 and 82BB10F8: selected grind intent, stock twist endpoints and retained fade, and grind crouch. Physical twist uses the native parts10/6 direction relative to Processed352 and Reckoning up. Canonical 50-50 names select the existing B_GRIND5050/B_BF_GRIND5050 animation trees; full chromosome naming/scorable identifiers are not ported.
 - 82BA8238: DistToEdge reads the existing OffBoard116 output. This resolves the mounting graph condition encountered in the launched build.
 
+The off-board drop-in (stand at the coping, press Y) is documented separately in
+[drop-in](drop-in.md), including the cradle-to-grave `Mount.IntoDropIn` ->
+`OnBoard.Grinding.DroppingIn` path and the retail-map edge candidates.
+
 ## Visual check
 
 The user's 2026-09-07 18:59:36 run confirmed acquisition: both truck contacts
