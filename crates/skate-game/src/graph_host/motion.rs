@@ -155,6 +155,26 @@ impl MotionHost {
         self.gesture_publication = None;
     }
 
+    pub(crate) fn behavior_is_character_gesture(&self, behavior: BehaviorId) -> bool {
+        self.remap
+            .behaviors
+            .get(behavior)
+            .and_then(|&operation| self.operations.get(operation))
+            .is_some_and(|operation| matches!(operation, MotionOperation::CharacterGesture))
+    }
+
+    /// A CharacterGesture owner that leaves its state must not keep driving the
+    /// arm overlay. Called after the controller update with this tick's activity.
+    pub(crate) fn trim_gesture_channels(&mut self, gesture_active: bool) {
+        if !gesture_active
+            && super::motion_character_gesture::CHANNELS
+                .iter()
+                .any(|name| self.animation.channels.has(name))
+        {
+            self.end_gesture_channels();
+        }
+    }
+
     pub fn from_graph(
         graph: &LoadedGraph,
         data: &Collections,

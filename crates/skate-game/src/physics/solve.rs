@@ -79,14 +79,19 @@ pub(super) fn advance(
     );
     let skeleton_drive_count = drives.rows.len();
     //82D74FD8: persistent hand drives share the deck and skeleton reactions.
-    skater.board_possession.append_drives(
-        physics.board.bodies()[BodyId::Deck.index()],
-        [skater.skeleton.bodies()[3], skater.skeleton.bodies()[7]],
-        BodyId::Deck.index(),
-        [ATTACHED_REACTION_BASE + 3, ATTACHED_REACTION_BASE + 7],
-        dt,
-        &mut drives.rows,
-    );
+    // They belong to the off-board board controller; once it is off (mounted),
+    // a stale selected hand must not keep pulling the arm toward the board.
+    let board_controller_on = skater.skateboard_controller.fields.system_on_452;
+    if board_controller_on {
+        skater.board_possession.append_drives(
+            physics.board.bodies()[BodyId::Deck.index()],
+            [skater.skeleton.bodies()[3], skater.skeleton.bodies()[7]],
+            BodyId::Deck.index(),
+            [ATTACHED_REACTION_BASE + 3, ATTACHED_REACTION_BASE + 7],
+            dt,
+            &mut drives.rows,
+        );
+    }
     let bodies = skater
         .skeleton
         .bodies_mut()
