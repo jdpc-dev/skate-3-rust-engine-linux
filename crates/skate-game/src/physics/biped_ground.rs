@@ -384,6 +384,7 @@ pub(crate) fn submit_geometry(
     owner.geometry.submit(
         &physics.world,
         Some(physics.grind_world.as_ref()),
+        &physics.host_edges,
         owner.ground.frame_80,
         result.velocity,
         skate_core::player::offboard::ground_query::QueryContext {

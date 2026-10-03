@@ -37,10 +37,12 @@ impl State {
             .map(|(packet, hits)| query::interpret_hits(&packet, hits));
         query::consume_geometry(input, geometry)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit(
         &mut self,
         world: &BoardWorld,
         grind: Option<&crate::grind_world::StaticProvider>,
+        host_edges: &[crate::physics::HostEdge],
         frame: [[f32; 4]; 4],
         velocity: [f32; 4],
         context: QueryContext,
@@ -48,7 +50,7 @@ impl State {
     ) -> Result<(), String> {
         let frame = query_frame(frame);
         let search = query::edge_search(frame, context, xyz(velocity), flags_2488);
-        let candidates = SceneService { world, grind }.edge_candidates(&search)?;
+        let candidates = SceneService { world, grind, host_edges }.edge_candidates(&search)?;
         let selected = query::select_edge(search, &candidates);
         let prepared = selected.and_then(|edge| {
             query::prepare_packet(frame, context, edge, self.collision_offset).map(|p| (edge, p))
@@ -80,7 +82,7 @@ impl State {
         if let Some((edge, packet)) = prepared {
             //82C20BF0 starts the real batch during Sync. Host execution may be
             //synchronous, but interpretation/publication waits for PreUpdate.
-            let hits = SceneService { world, grind }.query_lines(&packet)?;
+            let hits = SceneService { world, grind, host_edges }.query_lines(&packet)?;
             // TEMPORARY drop-in diagnostics (SKATE3_DROPIN_TRACE): record the
             // ledge classification and raw seven-line results whenever the drop
             // ray sees a fall, so a Mount.IntoDropIn precondition miss is visible.

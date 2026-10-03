@@ -92,6 +92,17 @@ use skate_core::{
 };
 use skate_data::collections::Collections;
 
+/// World-space off-board edge candidate contributed by a host-placed object.
+/// The biped ground query uses these for coping/ledge classification (drop-in).
+/// They are host geometry, separate from the authored grind provider, and are
+/// rebuilt with `GamePhysics` on a map change.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostEdge {
+    pub start: [f32; 3],
+    pub end: [f32; 3],
+    pub group: u64,
+}
+
 #[derive(Resource)]
 pub(crate) struct GamePhysics {
     pub(crate) network_proxies: network::Proxies,
@@ -102,6 +113,8 @@ pub(crate) struct GamePhysics {
     pub riding: RidingOutputs,
     world: BoardWorld,
     grind_world: std::sync::Arc<crate::grind_world::StaticProvider>,
+    /// Host-placed coping/ledge edges for the off-board ground query.
+    pub(crate) host_edges: Vec<HostEdge>,
     grind_materials: grind_materials::GrindMaterials,
     offboard_grab_scene: offboard::grab_scene::Registry,
     settings: PhysicsSettings,
@@ -262,6 +275,23 @@ impl GamePhysics {
         self.world.remove_triangles(range).map_err(str::to_owned)
     }
 
+    /// Register host-placed coping/ledge edges for the off-board ground query.
+    pub(crate) fn add_host_edges(
+        &mut self,
+        group: u64,
+        edges: impl IntoIterator<Item = ([f32; 3], [f32; 3])>,
+    ) {
+        self.host_edges.extend(edges.into_iter().map(|(start, end)| HostEdge {
+            start,
+            end,
+            group,
+        }));
+    }
+
+    pub(crate) fn remove_host_edges(&mut self, group: u64) {
+        self.host_edges.retain(|edge| edge.group != group);
+    }
+
     /// Flat-world convenience used by private-asset integration tests.
     #[cfg(test)]
     pub fn load(asset_root: &std::path::Path) -> Result<Self, String> {
@@ -363,6 +393,7 @@ impl GamePhysics {
             riding,
             world,
             grind_world,
+            host_edges: Vec::new(),
             grind_materials,
             offboard_grab_scene,
             settings,

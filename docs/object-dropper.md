@@ -38,11 +38,18 @@ packed surface code is taken from the template material's authored
 `audio | physics<<7 | pattern<<12` value, matching the portable map path.
 
 Because render geometry is used, contact classification and grindability are
-approximations. Placed props are **static**: they are not movable DMO bodies,
-they are not added to the grind-spline provider, and they do not carry the
-native dynamicobject shader. Deletion removes the appended canonical triangle
-range from `BoardWorld` (`BoardWorld::remove_triangles`); the map's own geometry
-is never touched. A map change clears every placed prop.
+approximations. Placed props are **static**: they are not movable DMO bodies and
+they are not added to the grind-spline provider. Deletion removes the appended
+canonical triangle range from `BoardWorld` (`BoardWorld::remove_triangles`); the
+map's own geometry is never touched. A map change clears every placed prop.
+
+Dropped props in the **Ramp** category also register host coping/ledge edges
+with the off-board ground query (`GamePhysics::host_edges`, consumed by
+`ground_sync::SceneService`). The edge builder keeps top-band edges that are open
+boundaries or hard transition-to-deck creases, so an on-foot skater can walk to
+the lip and drop in as they would on an authored ramp (see
+[drop-in.md](drop-in.md)). This is a host heuristic, not authored coping data;
+grind-spline candidacy is unchanged.
 
 ## Asset requirement
 

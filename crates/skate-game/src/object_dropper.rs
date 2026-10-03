@@ -62,6 +62,8 @@ pub(crate) struct PropAsset {
     meshes: Vec<(Handle<Mesh>, ObjectMaterial)>,
     /// Local-space contact triangles with the packed authored surface code.
     collision: Vec<([Vector3; 3], u16)>,
+    /// Local-space coping/ledge edges for the off-board ground query (drop-in).
+    drop_edges: Vec<(Vector3, Vector3)>,
 }
 
 /// Retail material tuning used to build object materials exactly like the map.
@@ -100,6 +102,8 @@ impl Default for PropTemplates {
 struct Placed {
     entity: Entity,
     range: std::ops::Range<usize>,
+    /// Group id of this object's registered off-board coping edges, if any.
+    host_group: Option<u64>,
 }
 
 #[derive(Resource, Default)]
@@ -110,6 +114,7 @@ pub(crate) struct Dropper {
     pub yaw: f32,
     revision: u64,
     last_batch: u64,
+    next_host_group: u64,
     preview: Option<Entity>,
     preview_id: Option<String>,
     placed: Vec<Placed>,
@@ -223,6 +228,76 @@ fn refresh(
     }
 }
 
+fn face_normal(points: &[[f32; 3]], face: &[u32]) -> [f32; 3] {
+    let a = points[face[0] as usize];
+    let b = points[face[1] as usize];
+    let c = points[face[2] as usize];
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 1e-9 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0., 1., 0.]
+    }
+}
+
+/// Coping/ledge edges for drop-in: top-band edges that are open boundaries or
+/// hard creases (transition-to-deck lip) and are more horizontal than vertical.
+/// This is a host heuristic; retail maps use authored coping splines instead.
+fn build_drop_edges(map: &SkateMap) -> Vec<(Vector3, Vector3)> {
+    let points: Vec<[f32; 3]> = map.geometry.vertices.iter().map(|v| v.position).collect();
+    if points.len() < 3 || map.geometry.indices.len() < 3 {
+        return Vec::new();
+    }
+    let max_y = points.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let band = ((max_y - min_y) * 0.25).clamp(0.2, 0.6);
+    // Canonical edge -> (count, reference normal, endpoints, crease).
+    let mut edges: HashMap<(u32, u32), (u32, [f32; 3], [f32; 3], [f32; 3], bool)> = HashMap::new();
+    for face in map.geometry.indices.chunks_exact(3) {
+        let normal = face_normal(&points, face);
+        for corner in 0..3 {
+            let (a, b) = (face[corner], face[(corner + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            let entry = edges
+                .entry(key)
+                .or_insert((0, normal, points[a as usize], points[b as usize], false));
+            if entry.0 >= 1 {
+                let dot = entry.1[0] * normal[0] + entry.1[1] * normal[1] + entry.1[2] * normal[2];
+                if dot < 0.86 {
+                    entry.4 = true;
+                }
+            }
+            entry.0 += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (_, (count, _, start, end, crease)) in edges {
+        if count != 1 && !crease {
+            continue;
+        }
+        if start[1].min(end[1]) < max_y - band {
+            continue;
+        }
+        let dy = (start[1] - end[1]).abs();
+        let horizontal = ((start[0] - end[0]).powi(2) + (start[2] - end[2]).powi(2)).sqrt();
+        if horizontal <= 1e-4 || dy > horizontal {
+            continue;
+        }
+        out.push((
+            Vector3::new(start[0], start[1], start[2]),
+            Vector3::new(end[0], end[1], end[2]),
+        ));
+    }
+    out
+}
+
 fn build_collision(map: &SkateMap) -> Vec<([Vector3; 3], u16)> {
     let mut out = Vec::with_capacity(map.geometry.indices.len() / 3);
     for face in map.geometry.indices.chunks_exact(3) {
@@ -275,6 +350,11 @@ fn load_asset(
             images,
         ),
         collision: build_collision(&map),
+        drop_edges: if template.category == "Ramp" {
+            build_drop_edges(&map)
+        } else {
+            Vec::new()
+        },
     });
     templates.loaded.insert(id.to_owned(), asset.clone());
     Ok(asset)
@@ -343,6 +423,9 @@ fn remove_placed(
     let placed = dropper.placed.remove(index);
     if let Err(e) = physics.remove_static_geometry(placed.range.clone()) {
         warn!("Object dropper delete failed: {e}");
+    }
+    if let Some(group) = placed.host_group {
+        physics.remove_host_edges(group);
     }
     commands.entity(placed.entity).despawn();
     let removed = placed.range.len();
@@ -510,17 +593,36 @@ fn run(
     };
     let entity = spawn_prop(&mut commands, &asset, transform);
     let floor = physics.floor_material();
-    let (triangles, surfaces) =
-        build_world_triangles(&asset, Mat4::from_rotation_translation(transform.rotation, transform.translation), floor);
+    let matrix = Mat4::from_rotation_translation(transform.rotation, transform.translation);
+    let (triangles, surfaces) = build_world_triangles(&asset, matrix, floor);
+    let mut host_group = None;
+    if !asset.drop_edges.is_empty() {
+        let group = dropper.next_host_group;
+        dropper.next_host_group = dropper.next_host_group.wrapping_add(1);
+        let edges = asset.drop_edges.iter().map(|(start, end)| {
+            let a = matrix.transform_point3(Vec3::new(start.x, start.y, start.z));
+            let b = matrix.transform_point3(Vec3::new(end.x, end.y, end.z));
+            ([a.x, a.y, a.z], [b.x, b.y, b.z])
+        });
+        physics.add_host_edges(group, edges);
+        host_group = Some(group);
+    }
     match physics.append_static_geometry(triangles, surfaces) {
         Ok(range) => {
-            dropper.placed.push(Placed { entity, range });
+            dropper.placed.push(Placed {
+                entity,
+                range,
+                host_group,
+            });
             while dropper.placed.len() > PLACED_CAP {
                 remove_placed(&mut commands, &mut physics, &mut dropper, 0);
             }
         }
         Err(e) => {
             warn!("Object dropper placement rejected: {e}");
+            if let Some(group) = host_group {
+                physics.remove_host_edges(group);
+            }
             commands.entity(entity).despawn();
         }
     }
@@ -717,6 +819,40 @@ mod tests {
     }
 
     #[test]
+    fn drop_edges_keep_the_horizontal_top_rim() {
+        // A vertical wall quad with a horizontal top edge at y = 1.
+        let vertex = |x: f32, y: f32| Vertex {
+            position: [x, y, 0.],
+            normal: [0., 0., 1.],
+            uv: [0., 0.],
+            lightmap_uv: [0., 0.],
+            material: 1,
+            decal_uv: None,
+            tangent_frame: None,
+        };
+        let mut map = triangle_map();
+        map.geometry = Geometry {
+            vertices: vec![vertex(0., 0.), vertex(1., 0.), vertex(0., 1.), vertex(1., 1.)],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            collision: vec![],
+        };
+        let edges = build_drop_edges(&map);
+        assert!(
+            edges.iter().any(|(a, b)| {
+                ((a.y - 1.).abs() < 1e-5 && (b.y - 1.).abs() < 1e-5)
+            }),
+            "top rim edge must be present: {edges:?}"
+        );
+        // Vertical side edges must be excluded.
+        assert!(
+            edges
+                .iter()
+                .all(|(a, b)| !((a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() > 1e-6)),
+            "only horizontal top edges are kept: {edges:?}"
+        );
+    }
+
+    #[test]
     fn placed_triangles_follow_the_placement_transform() {
         let asset = PropAsset {
             meshes: vec![],
@@ -728,6 +864,7 @@ mod tests {
                 ],
                 17,
             )],
+            drop_edges: vec![],
         };
         let floor = RetailContactMaterial {
             static_friction: 0.7,
@@ -779,6 +916,13 @@ mod tests {
                 "{} must use the retail object lighting path",
                 template.name
             );
+            if template.category == "Ramp" {
+                assert!(
+                    !build_drop_edges(&map).is_empty(),
+                    "{} ramp must expose coping edges for drop-in",
+                    template.name
+                );
+            }
             if verbose {
                 let bad_normals = map
                     .geometry
@@ -803,9 +947,12 @@ mod tests {
                     .filter(|v| v.normal[1] > 0.9)
                     .count();
                 let material = &map.materials[0];
+                let drop_edges = build_drop_edges(&map).len();
                 eprintln!(
-                    "DROPPER_DEBUG {} verts={} normals_bad={} normals_zero={} normals_up={} textures={:?} retail_definition={} retail_supported={:?} alpha_mode={} color={:?}",
+                    "DROPPER_DEBUG {} category={} drop_edges={} verts={} normals_bad={} normals_zero={} normals_up={} textures={:?} retail_definition={} retail_supported={:?} alpha_mode={} color={:?}",
                     template.name,
+                    template.category,
+                    drop_edges,
                     map.geometry.vertices.len(),
                     bad_normals,
                     zero_normals,
