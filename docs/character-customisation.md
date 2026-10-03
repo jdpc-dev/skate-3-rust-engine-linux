@@ -76,9 +76,11 @@ fix still needs the user's visual playtest; no game process was launched here.
 Right stick left/right rotates the character preview through 360 degrees. A
 24% dead zone prevents stick drift; rotation accelerates with stick deflection
 up to 2 radians/second. It uses real frame time while gameplay is paused and
-keeps the existing automatic close-up framing. The viewing angle resets when
-opening the customiser and is not saved into the character profile. V4 retains
-the V3 hair and gameplay changes and uses the same prepared library.
+keeps the existing automatic close-up framing. RB zooms in and LB zooms out
+while held, scaling the framing distance between 40% and 250% without moving
+the look-at point. The viewing angle resets when opening the customiser and is
+not saved into the character profile. V4 retains the V3 hair and gameplay
+changes and uses the same prepared library.
 
 Four main sections: **Body, Clothes, Board, Style**. Item lists are alphabetical,
 fit the available panel height, and can be filtered by typing. Backspace edits a
