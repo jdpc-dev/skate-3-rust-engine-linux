@@ -47,7 +47,12 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if std::env::args_os().any(|arg| arg == "--assets") { return Ok(PathBuf::from("assets")); }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("No executable directory")?;
-    let base = root.join("data");
+    // The AppImage is read-only, so its AppRun points this at a writable user
+    // directory. An unpacked copy keeps the portable data/ beside the binary.
+    let base = match std::env::var_os("SKATE3_DATA_DIR") {
+        Some(directory) => PathBuf::from(directory),
+        None => root.join("data"),
+    };
     let mut expected_customiser = None;
     let expected = match std::fs::read(root.join("release.json")) {
         Ok(bytes) => {

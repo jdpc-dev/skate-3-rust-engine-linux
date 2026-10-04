@@ -1,19 +1,22 @@
 # Linux build and play
 
 The engine builds and runs natively on Linux. The Windows `BUILD.bat` / `PLAY.bat`
-flow is replaced by three scripts under `scripts/`:
+flow is replaced by scripts under `scripts/`:
 
 | Windows | Linux |
 | --- | --- |
 | `BUILD.bat` + `scripts/Build.ps1` | `scripts/build-linux.sh` |
 | `support/skate3setup.exe` first-run setup | `support/setup-linux.sh` (run automatically) |
-| ISO extraction inside the setup helper | `scripts/extract-iso-wine.sh` |
+| ISO extraction inside the setup helper | native `extract-xiso`, or `scripts/extract-iso-wine.sh` |
 | `PLAY.bat` + `scripts/Launch.ps1` | `scripts/play-linux.sh` |
+| portable release ZIP | `scripts/build-appimage.sh` AppImage |
 
-There is no bundled Python runtime, installer, auto-updater or Steam relay on
-Linux. The first launch runs `support/setup-linux.sh`, which asks for your game
-and prepares the assets, using the system `python3` (with `numpy` and `Pillow`).
-Wine is only needed when the source is an ISO.
+There is no installer, auto-updater or Steam relay on Linux. The first launch
+runs `support/setup-linux.sh`, which asks for your game and prepares the assets.
+For players, `scripts/build-appimage.sh` bundles everything needed (portable
+CPython with numpy/Pillow and a native extract-xiso), so nothing has to be
+installed. A source checkout falls back to the system `python3` and, for ISO
+sources, to Wine. See [AppImage](#appimage) below.
 
 ## Prerequisites
 
@@ -41,7 +44,8 @@ Wine is only needed when the source is an ISO.
 - **Python 3** for asset conversion, with `numpy` and `Pillow`
   (`python3 -m pip install numpy Pillow`). `PyAV` (`python3 -m pip install av`)
   is optional and only enables gameplay audio decoding.
-- **Wine** is required only for the one-time ISO extraction step.
+- **Wine** is only needed to extract an ISO from a source checkout. The AppImage
+  bundles a native `extract-xiso` and does not use Wine.
 
 ## Build
 
@@ -67,6 +71,32 @@ Overridable environment variables: `PROFILE` (default `release`),
 
 If the native RefPack converter fails to build the script warns and continues;
 conversion then falls back to a slower pure-Python decoder.
+
+## AppImage
+
+`scripts/build-appimage.sh` produces
+`target/skate-3-rust-engine-linux-x86_64.AppImage`, one self-contained file.
+Players run it, pick their ISO or `default.xex` in a file chooser, and the
+engine extracts and converts the disc by itself. Nothing has to be installed:
+the AppImage bundles a portable CPython with `numpy`, `Pillow` and `PyAV`, a
+native `extract-xiso`, and the whole asset pipeline. Graphics drivers, Vulkan,
+audio and the window system come from the host, like any Linux game.
+
+```bash
+./scripts/build-appimage.sh
+chmod +x target/skate-3-rust-engine-linux-x86_64.AppImage
+target/skate-3-rust-engine-linux-x86_64.AppImage
+```
+
+Converted assets always go to `${XDG_DATA_HOME:-~/.local/share}/skate3rust`,
+so a moved AppImage or several copies reuse one installation. The first run
+prepares it; later runs start immediately. If your file manager cannot launch
+AppImages, run it from a terminal or use `--appimage-extract-and-run`.
+
+The build inputs (portable CPython, `extract-xiso`, `appimagetool`) are pinned
+by SHA-256 and cached under `target/appimage/`. Set `SKIP_BUILD=1` to reuse an
+already staged `run/`. Because the mounted AppImage is read-only, the bundled
+`mods/` and `maps/` load, but adding new ones needs a source checkout.
 
 ## Prepare assets
 
@@ -127,6 +157,9 @@ XInput-style gamepad.
 
 ## Package a release
 
+For players, use the self-contained [AppImage](#appimage) above. For a portable
+source-style archive (system `python3`, Wine for ISO sources):
+
 ```bash
 ./scripts/package-linux.sh
 ```
@@ -134,8 +167,8 @@ XInput-style gamepad.
 This builds and stages `run/`, then writes
 `target/skate3rust-linux-x64.tar.gz` and its `.sha256`. The archive omits
 `run/data/` (per-copy converted content) and `run/logs/`, and includes the
-interactive setup helper so a fresh extract sets itself up on first launch.
-Set `SKIP_BUILD=1` to package an already staged `run/` directory.
+interactive setup helper and the Python `tools/` so a fresh extract sets itself
+up on first launch. Set `SKIP_BUILD=1` to package an already staged `run/`.
 
 ## Controllers
 
@@ -150,8 +183,9 @@ controller currently means no input, so connect a pad before launching.
 ## Audio
 
 Gameplay audio is decoded from the owned disc during asset preparation. XMA2
-decoding needs `PyAV`; when it is missing, setup records the audio group as
-unavailable and the game still runs silently. See
+decoding needs `PyAV`; the AppImage bundles it, and a source checkout installs
+it with `python3 -m pip install av`. When it is missing, setup records the audio
+group as unavailable and the game still runs silently. See
 [gameplay audio](audio.md) for the format and mapping details.
 
 ## Differences from Windows

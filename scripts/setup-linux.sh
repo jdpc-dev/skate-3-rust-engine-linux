@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# First-run setup for the Linux release.
+# First-run setup for the Linux release and AppImage.
 #
-# The game invokes this automatically when <game dir>/data/installation.json is
-# missing or stale. It asks for an Xbox 360 ISO or a default.xex, extracts the
-# ISO with Wine when needed, and runs the owned-disc conversion. The converted
-# assets land in <base>, the same layout the Windows setup helper publishes.
+# The game invokes this automatically when the asset base has no
+# installation.json. It asks for an Xbox 360 ISO or a default.xex, extracts the
+# ISO when needed and runs the owned-disc conversion into --base.
 #
-# Requires python3 with numpy and Pillow (see docs/linux.md). Wine is only
-# needed when the source is an ISO; an already extracted disc skips it.
+# The AppImage sets SKATE3_PYTHON, SKATE3_TOOLS_DIR and SKATE3_EXTRACT_XISO so
+# nothing has to be installed. Source checkouts fall back to the system python3
+# and to extract-iso-wine.sh (which needs Wine only for ISO sources).
 set -euo pipefail
 
 usage() {
@@ -23,7 +23,7 @@ EOF
 
 Base=
 GameExe=
-Source=${SOURCE:-}
+Source=${SOURCE:-${SKATE3_SOURCE:-}}
 while [[ $# -gt 0 ]]; do
     case $1 in
         --base) Base=$2; shift 2 ;;
@@ -46,32 +46,56 @@ GameDir=$(cd "$(dirname "$GameExe")" && pwd)
 Base=$(realpath -m "$Base")
 mkdir -p "$Base"
 
-# The launcher captures the game's stdout/stderr into log files, so read the
-# prompt from the controlling terminal instead. Fall back to the redirected
-# streams when there is no terminal (for example a fully scripted install).
-ask_source() {
-    # Actually open the controlling terminal: a device node can be present
-    # while no terminal is attached, in which case reading it fails. Fall back
-    # to the inherited streams so a redirected install still works.
-    local in_fd=0 out_fd=1
-    if { exec 3</dev/tty; } 2>/dev/null && { exec 4>/dev/tty; } 2>/dev/null; then
-        in_fd=3
-        out_fd=4
+# A bundled AppImage points these at its own payload; a source checkout uses
+# the system interpreter and the tools shipped beside the binary.
+Python=${SKATE3_PYTHON:-${PYTHON:-python3}}
+ToolsDir=${SKATE3_TOOLS_DIR:-$GameDir/tools}
+Extractor=${SKATE3_EXTRACT_XISO:-}
+if [[ -z $Extractor && -x $ScriptDir/extract-xiso ]]; then
+    Extractor=$ScriptDir/extract-xiso
+fi
+
+notify() {
+    command -v notify-send >/dev/null && notify-send "$1" "$2" 2>/dev/null || true
+}
+gui_error() {
+    if command -v zenity >/dev/null; then
+        zenity --error --title='Skate 3 Rust Engine' --text="$1" 2>/dev/null || true
+    elif command -v kdialog >/dev/null; then
+        kdialog --error "$1" 2>/dev/null || true
     fi
-    printf '\nSkate 3 Rust Engine setup\nSelect your Skate 3 Xbox 360 ISO or default.xex.\nLeave empty to cancel.\n> ' >&"$out_fd"
-    IFS= read -r Source <&"$in_fd" || true
+}
+fail() {
+    echo "$1" >&2
+    notify 'Skate 3 Rust Engine' "$1"
+    gui_error "$1"
+    exit 1
+}
+
+# The launcher captures the game's stdout/stderr into log files, so prefer the
+# controlling terminal. An AppImage opened from a file manager has no terminal,
+# so fall back to a desktop file chooser, then to the inherited streams.
+ask_source() {
+    if { exec 3</dev/tty; } 2>/dev/null && { exec 4>/dev/tty; } 2>/dev/null; then
+        printf '\nSkate 3 Rust Engine setup\nSelect your Skate 3 Xbox 360 ISO or default.xex.\nLeave empty to cancel.\n> ' >&4
+        IFS= read -r Source <&3 || true
+    elif command -v zenity >/dev/null; then
+        Source=$(zenity --file-selection --title='Select your Skate 3 ISO or default.xex' \
+            --file-filter='Skate 3 (ISO or default.xex) | *.iso default.xex' \
+            --file-filter='All files | *' 2>/dev/null) || true
+    elif command -v kdialog >/dev/null; then
+        Source=$(kdialog --getopenfilename "$HOME" '*.iso default.xex|Skate 3' 2>/dev/null) || true
+    else
+        printf 'Select your Skate 3 Xbox 360 ISO or default.xex: ' >&2
+        IFS= read -r Source || true
+    fi
     # Tolerate paths pasted with surrounding quotes or whitespace.
     Source=$(printf '%s' "$Source" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
         -e "s/^['\"]//" -e "s/['\"]$//")
-    if [[ -z $Source ]]; then
-        echo 'Setup cancelled: no game selected.' >&2
-        exit 1
-    fi
+    [[ -n $Source ]] || fail 'Setup cancelled: no game selected.'
 }
 
-if [[ -z $Source ]]; then
-    ask_source
-fi
+[[ -n $Source ]] || ask_source
 # Expand a leading ~ the way a shell would.
 Source=${Source/#\~/$HOME}
 
@@ -83,8 +107,7 @@ elif [[ -f $Source ]]; then
     case ${Lower##*.} in
         xex)
             if [[ $Lower != default.xex ]]; then
-                echo 'Select default.xex inside your extracted Skate 3 game folder.' >&2
-                exit 1
+                fail 'Select default.xex inside your extracted Skate 3 game folder.'
             fi
             GameRoot=$(cd "$(dirname "$Source")" && pwd)
             ;;
@@ -95,54 +118,57 @@ elif [[ -f $Source ]]; then
                 echo "Reusing the disc extracted at $GameRoot"
             else
                 rm -rf "$GameRoot"
-                if [[ ! -x $ScriptDir/extract-iso-wine.sh ]]; then
-                    echo "Missing extract-iso-wine.sh beside $0" >&2
-                    exit 1
-                fi
+                mkdir -p "$GameRoot"
                 echo "Extracting $IsoPath"
-                SKATE3_SETUP_QUIET=1 "$ScriptDir/extract-iso-wine.sh" "$IsoPath" "$GameRoot"
+                if [[ -n $Extractor ]]; then
+                    "$Extractor" -x -d "$GameRoot" "$IsoPath"
+                elif [[ -x $ScriptDir/extract-iso-wine.sh ]]; then
+                    SKATE3_SETUP_QUIET=1 "$ScriptDir/extract-iso-wine.sh" "$IsoPath" "$GameRoot"
+                else
+                    fail 'No ISO extractor available. Unpack the complete package or install Wine.'
+                fi
             fi
             CleanupSource=1
             ;;
         *)
-            echo "Unsupported file: $Source (select a .iso or default.xex)" >&2
-            exit 1
+            fail "Unsupported file: $Source (select a .iso or default.xex)"
             ;;
     esac
 else
-    echo "No such file or directory: $Source" >&2
-    exit 1
+    fail "No such file or directory: $Source"
 fi
 
-Python=${PYTHON:-python3}
 if ! command -v "$Python" >/dev/null; then
-    echo 'python3 is required for asset preparation. Install it and retry.' >&2
-    exit 1
+    fail "python3 is required for asset preparation. Install it or use the AppImage."
 fi
 if ! "$Python" -c 'import numpy, PIL' >/dev/null 2>&1; then
-    echo "python3 is missing numpy/Pillow. Run: $Python -m pip install numpy Pillow" >&2
-    exit 1
+    fail "python3 is missing numpy/Pillow. Run: $Python -m pip install numpy Pillow"
 fi
 
-Prepare="$GameDir/tools/prepare_assets.py"
+Prepare="$ToolsDir/prepare_assets.py"
 if [[ ! -f $Prepare ]]; then
-    echo "Missing $Prepare. Unpack the complete Linux package." >&2
-    exit 1
+    fail "Missing $Prepare. Unpack the complete package."
 fi
 
-echo "Preparing Skate 3 assets into $Base (this can take a while)"
-"$Python" "$Prepare" --game-root "$GameRoot" --output "$Base" --game-exe "$GameExe"
+Log="$Base/setup-run.log"
+echo "Preparing Skate 3 assets into $Base (this can take a while). Log: $Log"
+set +e
+"$Python" "$Prepare" --game-root "$GameRoot" --output "$Base" --game-exe "$GameExe" 2>&1 | tee -a "$Log"
+Status=${PIPESTATUS[0]}
+set -e
+if (( Status != 0 )); then
+    fail "Setup failed. See $Log (and $Base/setup-error.log if present)."
+fi
 
 if [[ ! -f $Base/installation.json ]]; then
-    echo 'Setup did not publish an installation marker.' >&2
-    exit 1
+    fail 'Setup did not publish an installation marker.'
 fi
 
-# The extracted disc is only a source; the conversion copies what the game
-# needs. Keep it after a failure so a retry does not re-extract, discard it
-# once the installation is complete.
+# The extracted disc is only a source. Keep it after a failure so a retry does
+# not re-extract, discard it once the installation is complete.
 if [[ $CleanupSource = 1 ]]; then
     rm -rf "$GameRoot"
 fi
 
 echo 'Setup complete.'
+notify 'Skate 3 Rust Engine' 'Assets are ready. Starting the game...'

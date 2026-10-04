@@ -43,11 +43,12 @@ location. Run `BUILD.bat` to build, then `PLAY.bat` to launch the test world.
 `PLAY.bat` opens your saved map (University by default); use the in-game menu to switch maps, or drag a `.skate` file onto `PLAY.bat`. An XInput controller is required for gameplay;
 Escape opens difficulty and graphics settings.
 
-On Linux, build with `scripts/build-linux.sh` and launch with
-`scripts/play-linux.sh`. The first launch asks for your Skate 3 Xbox 360 ISO or
-`default.xex`, extracts the ISO if needed and prepares the assets automatically.
-See [Linux build and play](docs/linux.md) for system packages, the
-`scripts/package-linux.sh` release archive and controller/audio notes.
+On Linux, `scripts/build-appimage.sh` produces a self-contained AppImage: run
+it, select your Skate 3 Xbox 360 ISO or `default.xex`, and it extracts and
+prepares the assets itself. Nothing else needs installing. Source checkouts can
+build with `scripts/build-linux.sh` and launch with `scripts/play-linux.sh`.
+See [Linux build and play](docs/linux.md) for system packages, release archives
+and controller/audio notes.
 
 Development builds use a prepared asset set in `assets/private/` or the
 installed asset directory. `scripts/Build-Release.ps1` builds the portable Windows
