@@ -87,9 +87,10 @@ jobs:
             target/release.json
   linux:
     # The rolling experimental channel remains Windows-only, so skip Linux for
-    # that release event, exactly like the Windows job.
+    # that release event, exactly like the Windows job. Built on 22.04 so the
+    # AppImage runs on older glibc than the current ubuntu-latest.
     if: github.event_name != 'release' || github.event.release.tag_name != 'experimental'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     concurrency:
       group: linux-build-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
@@ -111,21 +112,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libasound2-dev libudev-dev \
+            build-essential pkg-config unzip libasound2-dev libudev-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
             libwayland-dev libxkbcommon-dev
-      # Records the character customiser fingerprint in release.json.
-      - name: Install asset pipeline dependencies
-        run: python -m pip install numpy Pillow
-      - name: Build and package Linux release
-        run: ./scripts/package-linux.sh
+      - name: Build the self-contained AppImage
+        run: ./scripts/build-appimage.sh
       - uses: actions/upload-artifact@v4
         with:
           name: skate3rust-linux-x64
           retention-days: 7
           path: |
-            target/skate3rust-linux-x64.tar.gz
-            target/skate3rust-linux-x64.tar.gz.sha256
+            target/skate-3-rust-engine-linux-x86_64.AppImage
+            target/skate-3-rust-engine-linux-x86_64.AppImage.sha256
   publish:
     needs: [windows, linux]
     if: github.event_name == 'release' || github.ref == 'refs/heads/main'
@@ -160,6 +158,6 @@ jobs:
             target/skate3rust-windows-x64.zip \
             target/skate3rust-windows-x64.zip.sha256 \
             target/release.json \
-            target/skate3rust-linux-x64.tar.gz \
-            target/skate3rust-linux-x64.tar.gz.sha256 \
+            target/skate-3-rust-engine-linux-x86_64.AppImage \
+            target/skate-3-rust-engine-linux-x86_64.AppImage.sha256 \
             --clobber
