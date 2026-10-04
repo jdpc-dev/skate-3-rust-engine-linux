@@ -70,6 +70,7 @@ mod known_air;
 mod landing_on_deck;
 mod offboard_audit_trace;
 mod drop_in_trace;
+mod grind_tip_trace;
 use crate::{
     app::{FrameSet, SimulationSet},
     world::PlayerRoot,
@@ -451,6 +452,7 @@ mod map_startup;
 pub(crate) struct PhysicsPlugin;
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
+        grind_tip_trace::announce();
         let period = app.world().resource::<GamePhysics>().clock.period();
         let asset_root = app
             .world()

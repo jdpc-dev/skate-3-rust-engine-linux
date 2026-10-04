@@ -127,6 +127,7 @@ pub(super) fn advance(
         player_state::post_input_and_select(physics, skater)?;
     }
     let state_after_selection = skater.player_state.current();
+    super::grind_tip_trace::stage(tick, "selected", physics, skater);
     super::offboard_audit_trace::stage(tick, "selected", physics, skater, controls);
     super::drop_in_trace::stage(tick, "selected", physics, skater, controls, graphs);
     #[cfg(test)]
@@ -240,6 +241,7 @@ pub(super) fn advance(
     //Teleport resets previous observations, but preserves this pending batch.
     skeleton_queries.publish(&mut skater.player_input.player);
     bevy::log::info_span!("fixed_collision_and_solve").in_scope(|| solve::advance(physics, skater, skater.ground.steering.targets))?;
+    super::grind_tip_trace::stage(tick, "solve", physics, skater);
     super::offboard_audit_trace::stage(tick, "solve", physics, skater, controls);
     #[cfg(test)]
     super::offboard_root_trace::trace(tick, "solve", skater);
@@ -247,6 +249,8 @@ pub(super) fn advance(
     //All consumers of the preceding output have completed this frame's input.
     super::player_input::reset_outputs(&mut skater.player_input.physical);
     bevy::log::info_span!("fixed_finish_skater").in_scope(|| physics.finish_skater(skater))?;
+    super::offboard_audit_trace::biped_pos(tick, "finish", skater);
+    super::grind_tip_trace::stage(tick, "finish", physics, skater);
     super::offboard_audit_trace::stage(tick, "finish", physics, skater, controls);
     #[cfg(test)]
     super::offboard_root_trace::trace(tick, "finish", skater);

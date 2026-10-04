@@ -14,7 +14,6 @@ pub(crate) struct SourceIdentity {
     pub section_offset: u64,
 }
 struct Asset {
-    #[cfg(test)]
     source: SourceIdentity,
     bounds: Bounds,
     indices: Vec<usize>,
@@ -23,12 +22,11 @@ struct Asset {
 pub(crate) struct StaticProvider {
     primitives: Vec<Primitive>,
     metadata: Vec<spline::PrimitiveMetadata>,
-    #[cfg(test)]
     rail_guids: Vec<[u64; 2]>,
     assets: Vec<Asset>,
-    #[cfg(test)]
+    /// Parallel to primitives; no endpoint-derived replacement boxes.
+    authored_bounds: Vec<Bounds>,
     source_for_primitive: Vec<usize>,
-    #[cfg(test)]
     source_rail_indices: Vec<u64>,
 }
 
@@ -37,10 +35,10 @@ impl StaticProvider {
     /// Missing provenance is an explicit conversion prerequisite, not a ray miss.
     pub fn new(map: Option<&SkateMap>) -> Result<Self, String> {
         let Some(map) = map else {
-            return Ok(Self { primitives: vec![], metadata: vec![], #[cfg(test)] rail_guids: vec![], assets: vec![], #[cfg(test)] source_for_primitive: vec![], #[cfg(test)] source_rail_indices: vec![] });
+            return Ok(Self { primitives: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
         };
         if map.rails.is_empty() {
-            return Ok(Self { primitives: vec![], metadata: vec![], #[cfg(test)] rail_guids: vec![], assets: vec![], #[cfg(test)] source_for_primitive: vec![], #[cfg(test)] source_rail_indices: vec![] });
+            return Ok(Self { primitives: vec![], metadata: vec![], rail_guids: vec![], assets: vec![], authored_bounds: vec![], source_for_primitive: vec![], source_rail_indices: vec![] });
         }
         if map.rails.iter().all(|rail| rail.native.is_none()) { return Self::authored(&map.rails); }
         let mut metadata = map.extensions.iter().filter(|e| e.tag == *b"WMET");
@@ -57,12 +55,10 @@ impl StaticProvider {
         let word = |at: usize| u32::from_be_bytes(bytes[at..at+4].try_into().unwrap());
         let mut grouped: Vec<(SourceIdentity, Vec<usize>)> = Vec::new();
         let mut source_index = HashMap::new();
+        let mut authored_bounds = Vec::with_capacity(primitives.len());
         let mut spatial_bounds = Vec::with_capacity(primitives.len());
-        #[cfg(test)]
         let mut source_for_primitive = Vec::with_capacity(primitives.len());
-        #[cfg(test)]
         let mut source_rail_indices = Vec::with_capacity(primitives.len());
-        #[cfg(test)]
         let mut rail_guids = Vec::with_capacity(map.rails.len());
         let mut ordinal = 0;
         for (rail, (record, package_rail)) in records.iter().zip(&map.rails).enumerate() {
@@ -80,7 +76,6 @@ impl StaticProvider {
             let count = (last-first)/144+1;
             let spline_id = ((word(header) as u64)<<32)|word(header+4) as u64;
             let type_signature = ((word(header+8) as u64)<<32)|word(header+12) as u64;
-            #[cfg(test)]
             rail_guids.push([spline_id, type_signature]);
             if parse_id(record, "spline_id")? != spline_id || number(record, "segment_count")? != count as u64
                 || parse_id(record, "type_signature")? != type_signature
@@ -94,33 +89,37 @@ impl StaticProvider {
             });
             for segment in 0..count {
                 let at = first+144*segment;
-                let bounds = Bounds {
-                    min: std::array::from_fn(|i| f32::from_bits(word(at+80+i*4))),
-                    max: std::array::from_fn(|i| f32::from_bits(word(at+96+i*4))),
-                };
-                spatial_bounds.push(bounds.identity_transformed());
-                grouped[asset].1.push(ordinal);
-                #[cfg(test)]
-                source_for_primitive.push(asset);
-                #[cfg(test)]
-                source_rail_indices.push(source_rail);
-                ordinal+=1;
+                let coefficients: [[f32;4];4] = std::array::from_fn(|v|
+                    std::array::from_fn(|j| f32::from_bits(word(at+v*16+j*4))));
+                // One entry per straight contact chord, matching decoded_from_blob.
+                for pair in spline::sub_chord_points(&coefficients).windows(2) {
+                    let (start, end) = (pair[0], pair[1]);
+                    let bounds = Bounds {
+                        min: std::array::from_fn(|i| start[i].min(end[i])),
+                        max: std::array::from_fn(|i| start[i].max(end[i])),
+                    };
+                    authored_bounds.push(bounds);
+                    spatial_bounds.push(bounds.identity_transformed());
+                    grouped[asset].1.push(ordinal);
+                    source_for_primitive.push(asset);
+                    source_rail_indices.push(source_rail);
+                    ordinal+=1;
+                }
             }
         }
-        let assets = grouped.into_iter().map(|(_source, indices)| {
+        let assets = grouped.into_iter().map(|(source, indices)| {
             let bounds = indices.iter().map(|&i| spatial_bounds[i]).reduce(Bounds::union)
                 .ok_or("Empty stock grind source section")?.padded();
             let tree = Octree::new(bounds, indices.iter().map(|&i| spatial_bounds[i]).collect())?;
-            Ok(Asset { #[cfg(test)] source: _source, bounds, indices, tree })
+            Ok(Asset { source, bounds, indices, tree })
         }).collect::<Result<_, String>>()?;
-        Ok(Self { primitives, metadata, #[cfg(test)] rail_guids, assets, #[cfg(test)] source_for_primitive, #[cfg(test)] source_rail_indices })
+        Ok(Self { primitives, metadata, rail_guids, assets, authored_bounds, source_for_primitive, source_rail_indices })
     }
 
     /// Explicit host-authored polylines have no retail source section identity.
     pub fn authored(rails: &[skate_data::skate_map::Rail]) -> Result<Self, String> {
         let bytes = spline::build_rails(rails)?;
         let (primitives, metadata) = spline::decoded_from_blob(&bytes)?;
-        #[cfg(test)]
         let rail_guids = (0..rails.len()).map(|i| {
             let at = 16 + i * 32;
             [u64::from_be_bytes(bytes[at..at+8].try_into().unwrap()),
@@ -133,15 +132,14 @@ impl StaticProvider {
         let assets = if let Some(bounds) = authored_bounds.iter().copied().reduce(Bounds::union) {
             let bounds = bounds.padded();
             vec![Asset {
-                #[cfg(test)]
                 source: SourceIdentity { stream_file: String::new(), asset_id: "host-authored".into(), section_index: 0, section_offset: 0 },
                 bounds, indices: (0..primitives.len()).collect(),
                 tree: Octree::new(bounds, authored_bounds.clone())?,
             }]
         } else { vec![] };
-        #[cfg(test)]
         let source_rail_indices = primitives.iter().map(|p| p.owner - 1).collect();
-        Ok(Self { #[cfg(test)] source_for_primitive: vec![0; primitives.len()], primitives, metadata, #[cfg(test)] rail_guids, assets, #[cfg(test)] source_rail_indices })
+        Ok(Self { source_for_primitive: vec![0; primitives.len()], primitives, metadata,
+            rail_guids, assets, authored_bounds, source_rail_indices })
     }
 
     pub fn primitives(&self) -> &[Primitive] { &self.primitives }
@@ -151,20 +149,21 @@ impl StaticProvider {
     }
 
     /// Resolve contact's map-local header handle without confusing it with GUID.
-    #[cfg(test)]
     pub fn spline_guids(&self, owner: u64) -> Option<[u64; 2]> {
         let rail = usize::try_from(owner.checked_sub(1)?).ok()?;
         self.rail_guids.get(rail).copied()
     }
 
-    #[cfg(test)]
     pub fn source_rail_index(&self, primitive: usize) -> Option<u64> {
         self.source_rail_indices.get(primitive).copied()
     }
 
-    #[cfg(test)]
     pub fn source(&self, primitive: usize) -> Option<&SourceIdentity> {
         self.source_for_primitive.get(primitive).map(|&asset| &self.assets[asset].source)
+    }
+
+    pub fn bounds(&self, primitive: usize) -> Option<([f32; 3], [f32; 3])> {
+        self.authored_bounds.get(primitive).map(|b| (b.min, b.max))
     }
 
     /// S3 82C1EAD8 static pass only: query gate, ordered asset overlap and

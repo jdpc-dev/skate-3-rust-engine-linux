@@ -1198,6 +1198,77 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "diagnostic; requires SKATE_MAP_TEST_PATH and SKATE_DUMP_POINT=x,y,z"]
+    fn dump_collision_near_point() {
+        let path = std::env::var("SKATE_MAP_TEST_PATH").unwrap();
+        let point: Vec<f32> = std::env::var("SKATE_DUMP_POINT")
+            .unwrap()
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let radius: f32 = std::env::var("SKATE_DUMP_RADIUS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.6);
+        let map = SkateMap::load(std::path::Path::new(&path)).unwrap();
+        let world = collision_world(&map, material()).unwrap();
+        let packed = world.query_metadata().unwrap().packed_surfaces.clone();
+        let mut hits = 0;
+        for (i, tri) in world.triangles().iter().enumerate() {
+            let v = tri.triangle.vertices;
+            let centroid = [
+                (v[0].x + v[1].x + v[2].x) / 3.,
+                (v[0].y + v[1].y + v[2].y) / 3.,
+                (v[0].z + v[1].z + v[2].z) / 3.,
+            ];
+            let d = ((centroid[0] - point[0]).powi(2)
+                + (centroid[1] - point[1]).powi(2)
+                + (centroid[2] - point[2]).powi(2))
+            .sqrt();
+            if d > radius {
+                continue;
+            }
+            hits += 1;
+            let f = tri.triangle.feature;
+            eprintln!(
+                "TRI {i} d={d:.3} v0=({:.3},{:.3},{:.3}) v1=({:.3},{:.3},{:.3}) v2=({:.3},{:.3},{:.3}) \
+n=({:.3},{:.3},{:.3}) flags={:x} surf={:x} conv={}{}{} vdis={}{}{}",
+                v[0].x, v[0].y, v[0].z,
+                v[1].x, v[1].y, v[1].z,
+                v[2].x, v[2].y, v[2].z,
+                f.normal.x, f.normal.y, f.normal.z,
+                f.flags, packed[i],
+                f.edge_convex(0) as u8, f.edge_convex(1) as u8, f.edge_convex(2) as u8,
+                f.vertex_disabled(0) as u8, f.vertex_disabled(1) as u8, f.vertex_disabled(2) as u8,
+            );
+        }
+        eprintln!("DUMP_COLLISION near={point:?} radius={radius} hits={hits}");
+        let mut render_hits = 0;
+        for tri in map.geometry.indices.chunks_exact(3) {
+            let v = [0usize, 1, 2].map(|k| map.geometry.vertices[tri[k] as usize].position);
+            let centroid = [
+                (v[0][0] + v[1][0] + v[2][0]) / 3.,
+                (v[0][1] + v[1][1] + v[2][1]) / 3.,
+                (v[0][2] + v[1][2] + v[2][2]) / 3.,
+            ];
+            let d = ((centroid[0] - point[0]).powi(2)
+                + (centroid[1] - point[1]).powi(2)
+                + (centroid[2] - point[2]).powi(2))
+            .sqrt();
+            if d > radius {
+                continue;
+            }
+            render_hits += 1;
+            eprintln!(
+                "RTRI d={d:.3} v0=({:.3},{:.3},{:.3}) v1=({:.3},{:.3},{:.3}) v2=({:.3},{:.3},{:.3})",
+                v[0][0], v[0][1], v[0][2],
+                v[1][0], v[1][1], v[1][2],
+                v[2][0], v[2][1], v[2][2],
+            );
+        }
+        eprintln!("DUMP_RENDER near={point:?} radius={radius} hits={render_hits}");
+    }
+    #[test]
     fn map_collision_uses_separate_geometry_and_surface_metadata() {
         let mut map = demo();
         map.geometry.vertices[0].position = [1000.; 3];
