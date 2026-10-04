@@ -32,7 +32,7 @@ pub(super) fn advance(
     // Skeleton82BE5094 passes false to82768728: its edge threshold is -1,
     // whereas the board requests .999. GroundPipeline supplies the remaining
     // shared values. Do not let the second query overwrite the first's rows.
-    let grind_segment = grind_filter_segment(skater);
+    let grind_segments = grind_nearby_segments(physics, skater);
     let mut contacts = physics
         .world
         .query_primitives(&board_volumes, physics.query, physics.retention)
@@ -49,9 +49,10 @@ pub(super) fn advance(
     // A valid grind owns the rail: its tube still supports the board, but the
     // tube's end face must not act as a wall for the board nor let the rider's
     // body slam the tip (regional-force wipeout). Drop the rail's non-support
-    // board contacts and every rider-rail contact at the grinded primitive.
-    if let Some([start, end]) = grind_segment {
-        keep_grind_support_only(&mut contacts, physics.ticks, start, end);
+    // board contacts and every rider-rail contact around any nearby primitive,
+    // so a tessellated rail's neighbouring sub-chords are covered too.
+    if !grind_segments.is_empty() {
+        keep_grind_support_only(&mut contacts, physics.ticks, &grind_segments);
     }
     assembly_contacts::append(
         &mut contacts,
@@ -135,17 +136,43 @@ pub(super) fn advance(
     Ok(())
 }
 
-/// The rail primitive the board is currently grinding, or the one it is
-/// acquiring from the air. Active families publish their contact primitive;
-/// airborne acquisition has only the trajectory selector's latched target.
-fn grind_filter_segment(skater: &SkaterRuntime) -> Option<[[u32; 4]; 2]> {
+/// True when the board is grinding, acquiring, or still holding a latched grind
+/// target, so the grind system (not the raw collision) owns its rail.
+fn grind_context_active(skater: &SkaterRuntime) -> bool {
     let grind = skater.player_input.processed.grind;
-    let active = skater.grind.active_family().is_some() || grind.valid_1488;
-    if active && (grind.primitive_start_1264 != [0; 4] || grind.primitive_end_1280 != [0; 4]) {
-        return Some([grind.primitive_start_1264, grind.primitive_end_1280]);
+    if skater.grind.active_family().is_some() || grind.valid_1488 {
+        return true;
     }
-    let target = skater.trajectory.selector.selection()?.grind?;
-    Some([target.edge.start.map(f32::to_bits), target.edge.end.map(f32::to_bits)])
+    if grind.second_start_1312 != [0; 4] || grind.second_end_1328 != [0; 4] {
+        return true;
+    }
+    skater
+        .trajectory
+        .selector
+        .selection()
+        .is_some_and(|selection| selection.grind.is_some())
+}
+
+/// Every grind primitive near the board, as `[start, end]` float lanes. Using
+/// all of them (not just the latched target) covers a tessellated rail's
+/// neighbouring sub-chords, where the leading wheel or rider body actually
+/// contacts the tip.
+fn grind_nearby_segments(physics: &GamePhysics, skater: &SkaterRuntime) -> Vec<[[f32; 4]; 2]> {
+    if !grind_context_active(skater) {
+        return Vec::new();
+    }
+    let deck = physics.board.part_transforms()[BodyId::Deck.index()].translation;
+    let span = 1.0f32;
+    let min = [deck.x - span, deck.y - span, deck.z - span];
+    let max = [deck.x + span, deck.y + span, deck.z + span];
+    let Ok(indices) = physics.grind_world.query(min, max) else {
+        return Vec::new();
+    };
+    indices
+        .iter()
+        .filter_map(|&index| physics.grind_world.primitives().get(index))
+        .map(|primitive| [primitive.start, primitive.end])
+        .collect()
 }
 
 /// While a grind family owns the board, the grind system owns the board's
@@ -153,12 +180,11 @@ fn grind_filter_segment(skater: &SkaterRuntime) -> Option<[[u32; 4]; 2]> {
 /// contacts (the surface the board rides on); drop the tube's cap, curl, side
 /// and underside contacts, which the solver otherwise treats as walls and uses
 /// to brake the board or drag it back near the ends. Contacts with any other
-/// geometry, and contacts away from the grinded primitive, are untouched.
+/// geometry, and contacts away from every nearby primitive, are untouched.
 fn keep_grind_support_only(
     contacts: &mut Vec<BoardCollision>,
     tick: u64,
-    primitive_start: [u32; 4],
-    primitive_end: [u32; 4],
+    segments: &[[[f32; 4]; 2]],
 ) {
     const RAIL_RADIUS: f32 = 0.35;
     // Contacts beyond either endpoint still belong to the rail's tip/post. A
@@ -169,27 +195,37 @@ fn keep_grind_support_only(
     // to the axis, up). Comparing against world up keeps the tube's rounded
     // tip/curl and side faces, which brake the board and drag it backwards.
     const SUPPORT_ALIGNMENT: f32 = 0.9;
-    let f = f32::from_bits;
-    let start = [f(primitive_start[0]), f(primitive_start[1]), f(primitive_start[2])];
-    let end = [f(primitive_end[0]), f(primitive_end[1]), f(primitive_end[2])];
-    let axis = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
-    if !(length > 1.0e-4) {
+    let mut frames: Vec<([f32; 3], [f32; 3], f32, [f32; 3])> = Vec::with_capacity(segments.len());
+    for [s, e] in segments {
+        let start = [s[0], s[1], s[2]];
+        let end = [e[0], e[1], e[2]];
+        let axis = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if !(length > 1.0e-4) {
+            continue;
+        }
+        let unit = [axis[0] / length, axis[1] / length, axis[2] / length];
+        let up = [0.0f32, 1.0, 0.0];
+        let along = up[0] * unit[0] + up[1] * unit[1] + up[2] * unit[2];
+        let mut upmost = [up[0] - unit[0] * along, up[1] - unit[1] * along, up[2] - unit[2] * along];
+        let upmost_length =
+            (upmost[0] * upmost[0] + upmost[1] * upmost[1] + upmost[2] * upmost[2]).sqrt();
+        if upmost_length > 1.0e-4 {
+            upmost = [
+                upmost[0] / upmost_length,
+                upmost[1] / upmost_length,
+                upmost[2] / upmost_length,
+            ];
+        } else {
+            upmost = up;
+        }
+        if upmost[1] < 0.0 {
+            upmost = upmost.map(|v| -v);
+        }
+        frames.push((start, unit, length, upmost));
+    }
+    if frames.is_empty() {
         return;
-    }
-    let unit = [axis[0] / length, axis[1] / length, axis[2] / length];
-    // Rail upmost normal: up minus its axis component, normalized, flipped up.
-    let up = [0.0f32, 1.0, 0.0];
-    let along = up[0] * unit[0] + up[1] * unit[1] + up[2] * unit[2];
-    let mut upmost = [up[0] - unit[0] * along, up[1] - unit[1] * along, up[2] - unit[2] * along];
-    let upmost_length = (upmost[0] * upmost[0] + upmost[1] * upmost[1] + upmost[2] * upmost[2]).sqrt();
-    if upmost_length > 1.0e-4 {
-        upmost = [upmost[0] / upmost_length, upmost[1] / upmost_length, upmost[2] / upmost_length];
-    } else {
-        upmost = up;
-    }
-    if upmost[1] < 0.0 {
-        upmost = upmost.map(|v| -v);
     }
     let trace = super::grind_tip_trace::enabled();
     contacts.retain(|contact| {
@@ -212,18 +248,25 @@ fn keep_grind_support_only(
             point
         };
         let point = [point.x, point.y, point.z];
-        let rel = [point[0] - start[0], point[1] - start[1], point[2] - start[2]];
-        let t = (rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2])
-            .clamp(-END_EXTENSION, length + END_EXTENSION);
-        let closest = [
-            start[0] + unit[0] * t,
-            start[1] + unit[1] * t,
-            start[2] + unit[2] * t,
-        ];
-        let distance = ((point[0] - closest[0]).powi(2)
-            + (point[1] - closest[1]).powi(2)
-            + (point[2] - closest[2]).powi(2))
-        .sqrt();
+        let mut best: Option<(f32, [f32; 3])> = None;
+        for (start, unit, length, upmost) in &frames {
+            let rel = [point[0] - start[0], point[1] - start[1], point[2] - start[2]];
+            let t = (rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2])
+                .clamp(-END_EXTENSION, length + END_EXTENSION);
+            let closest = [
+                start[0] + unit[0] * t,
+                start[1] + unit[1] * t,
+                start[2] + unit[2] * t,
+            ];
+            let distance = ((point[0] - closest[0]).powi(2)
+                + (point[1] - closest[1]).powi(2)
+                + (point[2] - closest[2]).powi(2))
+            .sqrt();
+            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                best = Some((distance, *upmost));
+            }
+        }
+        let (distance, upmost) = best.expect("frames is not empty");
         if distance >= RAIL_RADIUS {
             return true;
         }
@@ -267,10 +310,10 @@ mod tests {
         physics::contact::RetailContactInput,
     };
 
-    fn rail(start: [f32; 3], end: [f32; 3]) -> [[u32; 4]; 2] {
+    fn rail(start: [f32; 3], end: [f32; 3]) -> [[f32; 4]; 2] {
         [
-            [start[0].to_bits(), start[1].to_bits(), start[2].to_bits(), 0],
-            [end[0].to_bits(), end[1].to_bits(), end[2].to_bits(), 0],
+            [start[0], start[1], start[2], 0.],
+            [end[0], end[1], end[2], 0.],
         ]
     }
 
@@ -292,7 +335,7 @@ mod tests {
 
     #[test]
     fn grind_keeps_upward_support_and_drops_rail_side_and_cap() {
-        let [start, end] = rail([0., 0., 0.], [0., 0., 10.]);
+        let segments = [rail([0., 0., 0.], [0., 0., 10.])];
         let mut contacts = vec![
             // Head-on end face at the rail tip (normal along rail): removed.
             contact(CollisionBody::Board(BodyId::Deck), [0., 0., 1.], [0., 0., 9.9]),
@@ -311,7 +354,7 @@ mod tests {
             // Board face far from this primitive: kept even though horizontal.
             contact(CollisionBody::Board(BodyId::Deck), [1., 0., 0.], [0., 0., 40.]),
         ];
-        keep_grind_support_only(&mut contacts, 0, start, end);
+        keep_grind_support_only(&mut contacts, 0, &segments);
         assert_eq!(contacts.len(), 4);
         assert!(matches!(contacts[0].body_a, CollisionBody::Board(BodyId::RightFrontWheel)));
         assert!(matches!(contacts[1].body_a, CollisionBody::Board(BodyId::BackTruck)));
