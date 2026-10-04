@@ -15,6 +15,146 @@ fn native(id: u64, length: f32) -> Rail {
     Rail { name: "owned test rail".into(), closed: false, points: vec![], native: Some(raw) }
 }
 
+/// Diagnostic: distinct native rail type signatures, with curvature counts.
+#[test]
+#[ignore = "diagnostic; requires SKATE_MAP_TEST_PATH"]
+fn dump_rail_type_signatures() {
+    let map = skate_data::skate_map::SkateMap::load(std::path::Path::new(
+        &std::env::var("SKATE_MAP_TEST_PATH").unwrap(),
+    ))
+    .unwrap();
+    let mut by_type = std::collections::BTreeMap::<u64, (usize, usize)>::new();
+    for rail in &map.rails {
+        let Some(raw) = &rail.native else { continue };
+        if raw.len() < 16 {
+            continue;
+        }
+        let signature = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        let words: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        let mut curved = 0;
+        for segment in words[7..].chunks_exact(30) {
+            let f = |i: usize| f32::from_bits(segment[i]);
+            let position = |t: f32| {
+                let a = [f(0), f(1), f(2)];
+                let b = [f(4), f(5), f(6)];
+                let c = [f(8), f(9), f(10)];
+                let d = [f(12), f(13), f(14)];
+                core::array::from_fn::<f32, 3, _>(|j| ((a[j] * t + b[j]) * t + c[j]) * t + d[j])
+            };
+            let start = position(0.0);
+            let end = position(1.0);
+            let mid = position(0.5);
+            let midpoint = core::array::from_fn::<f32, 3, _>(|j| (start[j] + end[j]) * 0.5);
+            let dev = ((mid[0] - midpoint[0]).powi(2)
+                + (mid[1] - midpoint[1]).powi(2)
+                + (mid[2] - midpoint[2]).powi(2))
+            .sqrt();
+            if dev > 0.01 {
+                curved += 1;
+            }
+        }
+        let entry = by_type.entry(signature).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += curved;
+    }
+    for (signature, (rails, curved)) in &by_type {
+        eprintln!("RAIL_TYPE sig=0x{signature:016x} rails={rails} curved_segments={curved}");
+    }
+}
+
+/// Diagnostic: the real retail provider builds and stays index-aligned after
+/// curved-segment tessellation.
+#[test]
+#[ignore = "diagnostic; requires SKATE_MAP_TEST_PATH"]
+fn retail_provider_builds_with_curved_tessellation() {
+    let map = skate_data::skate_map::SkateMap::load(std::path::Path::new(
+        &std::env::var("SKATE_MAP_TEST_PATH").unwrap(),
+    ))
+    .unwrap();
+    let provider = super::StaticProvider::new(Some(&map)).unwrap();
+    let primitives = provider.primitives();
+    assert!(primitives.len() >= map.rails.len());
+    for i in 0..primitives.len() {
+        assert!(provider.metadata(i).is_some(), "missing metadata {i}");
+        assert!(provider.source(i).is_some(), "missing source {i}");
+        assert!(provider.source_rail_index(i).is_some(), "missing rail {i}");
+    }
+    eprintln!(
+        "RETAIL_PROVIDER primitives={} native_segments=27008 rails={}",
+        primitives.len(),
+        map.rails.len()
+    );
+}
+
+/// Diagnostic: how far each native cubic strays from its straight chord.
+#[test]
+#[ignore = "diagnostic; requires SKATE_MAP_TEST_PATH"]
+fn curved_rail_chord_deviation() {
+    let map = skate_data::skate_map::SkateMap::load(std::path::Path::new(
+        &std::env::var("SKATE_MAP_TEST_PATH").unwrap(),
+    ))
+    .unwrap();
+    let (mut segments, mut curved, mut worst) = (0usize, 0usize, 0.0f32);
+    let mut histogram = [0usize; 7];
+    for rail in &map.rails {
+        let Some(raw) = &rail.native else { continue };
+        if raw.len() < 28 {
+            continue;
+        }
+        let words: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        for segment in words[7..].chunks_exact(30) {
+            let f = |i: usize| f32::from_bits(segment[i]);
+            let a = [f(0), f(1), f(2)];
+            let b = [f(4), f(5), f(6)];
+            let c = [f(8), f(9), f(10)];
+            let d = [f(12), f(13), f(14)];
+            let position = |t: f32| {
+                core::array::from_fn::<f32, 3, _>(|j| ((a[j] * t + b[j]) * t + c[j]) * t + d[j])
+            };
+            let start = position(0.0);
+            let end = position(1.0);
+            let chord = core::array::from_fn::<f32, 3, _>(|j| end[j] - start[j]);
+            let chord_length = (chord[0] * chord[0] + chord[1] * chord[1] + chord[2] * chord[2]).sqrt();
+            let mut deviation = 0.0f32;
+            if chord_length > 1.0e-6 {
+                let unit = core::array::from_fn::<f32, 3, _>(|j| chord[j] / chord_length);
+                for k in 1..16 {
+                    let t = k as f32 / 16.0;
+                    let p = position(t);
+                    let rel = core::array::from_fn::<f32, 3, _>(|j| p[j] - start[j]);
+                    let along = rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2];
+                    let perp = core::array::from_fn::<f32, 3, _>(|j| rel[j] - unit[j] * along);
+                    deviation = deviation.max(
+                        (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt(),
+                    );
+                }
+            }
+            segments += 1;
+            if deviation > 0.01 {
+                curved += 1;
+            }
+            worst = worst.max(deviation);
+            let bucket = (deviation * 100.0).log2().max(0.0) as usize;
+            histogram[bucket.min(6)] += 1;
+            if deviation > 0.1 {
+                eprintln!(
+                    "CURVED_SEG rail={} deviation={deviation:.3} start=({:.3},{:.3},{:.3}) end=({:.3},{:.3},{:.3})",
+                    rail.name, start[0], start[1], start[2], end[0], end[1], end[2]
+                );
+            }
+        }
+    }
+    eprintln!(
+        "CURVED_RAIL segments={segments} curved(>1cm)={curved} worst={worst:.4} histogram_cm={histogram:?}"
+    );
+}
+
 #[test]
 fn no_map_keeps_current_flat_course_empty() {
     assert!(primitives(None).unwrap().is_empty());

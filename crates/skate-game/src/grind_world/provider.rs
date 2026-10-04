@@ -89,16 +89,22 @@ impl StaticProvider {
             });
             for segment in 0..count {
                 let at = first+144*segment;
-                let bounds = Bounds {
-                    min: std::array::from_fn(|i| f32::from_bits(word(at+80+i*4))),
-                    max: std::array::from_fn(|i| f32::from_bits(word(at+96+i*4))),
-                };
-                authored_bounds.push(bounds);
-                spatial_bounds.push(bounds.identity_transformed());
-                grouped[asset].1.push(ordinal);
-                source_for_primitive.push(asset);
-                source_rail_indices.push(source_rail);
-                ordinal+=1;
+                let coefficients: [[f32;4];4] = std::array::from_fn(|v|
+                    std::array::from_fn(|j| f32::from_bits(word(at+v*16+j*4))));
+                // One entry per straight contact chord, matching decoded_from_blob.
+                for pair in spline::sub_chord_points(&coefficients).windows(2) {
+                    let (start, end) = (pair[0], pair[1]);
+                    let bounds = Bounds {
+                        min: std::array::from_fn(|i| start[i].min(end[i])),
+                        max: std::array::from_fn(|i| start[i].max(end[i])),
+                    };
+                    authored_bounds.push(bounds);
+                    spatial_bounds.push(bounds.identity_transformed());
+                    grouped[asset].1.push(ordinal);
+                    source_for_primitive.push(asset);
+                    source_rail_indices.push(source_rail);
+                    ordinal+=1;
+                }
             }
         }
         let assets = grouped.into_iter().map(|(source, indices)| {

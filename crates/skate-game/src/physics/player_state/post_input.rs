@@ -256,6 +256,10 @@ pub(super) fn advance(physics: &mut GamePhysics, skater: &mut SkaterRuntime) -> 
         .ok_or("Grind post-input did not publish its result")?;
     processed.flags_2468 |= services.processed.flags_2468 & 0x0004_0000;
     drop(services);
+    super::super::grind_tip_trace::note_wipeout_reasons(
+        physics.ticks,
+        &grind_result.wipeout_reasons,
+    );
     for reason in grind_result.wipeout_reasons {
         skater.wipeout.state.request(reason, 0.0);
     }

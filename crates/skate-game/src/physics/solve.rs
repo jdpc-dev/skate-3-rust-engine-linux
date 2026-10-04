@@ -5,7 +5,7 @@ mod diagnostics;
 use super::{GamePhysics, SkaterRuntime, colliders, skeleton_colliders};
 use skate_core::physics::{
     board::BodyId,
-    board_step::{ATTACHED_REACTION_BASE, AttachedStep},
+    board_step::{ATTACHED_REACTION_BASE, AttachedStep, BoardCollision, CollisionBody},
     skeleton_animation_record::{AnimationPartTransform, IDENTITY},
     skeleton_body::PART_COUNT,
 };
@@ -32,6 +32,7 @@ pub(super) fn advance(
     // Skeleton82BE5094 passes false to82768728: its edge threshold is -1,
     // whereas the board requests .999. GroundPipeline supplies the remaining
     // shared values. Do not let the second query overwrite the first's rows.
+    let grind_segment = grind_filter_segment(skater);
     let mut contacts = physics
         .world
         .query_primitives(&board_volumes, physics.query, physics.retention)
@@ -45,6 +46,13 @@ pub(super) fn advance(
         skeleton_query,
         physics.retention,
     ));
+    // A valid grind owns the rail: its tube still supports the board, but the
+    // tube's end face must not act as a wall for the board nor let the rider's
+    // body slam the tip (regional-force wipeout). Drop the rail's non-support
+    // board contacts and every rider-rail contact at the grinded primitive.
+    if let Some([start, end]) = grind_segment {
+        keep_grind_support_only(&mut contacts, physics.ticks, start, end);
+    }
     assembly_contacts::append(
         &mut contacts,
         &board_volumes,
@@ -127,6 +135,108 @@ pub(super) fn advance(
     Ok(())
 }
 
+/// The rail primitive the board is currently grinding, or the one it is
+/// acquiring from the air. Active families publish their contact primitive;
+/// airborne acquisition has only the trajectory selector's latched target.
+fn grind_filter_segment(skater: &SkaterRuntime) -> Option<[[u32; 4]; 2]> {
+    let grind = skater.player_input.processed.grind;
+    let active = skater.grind.active_family().is_some() || grind.valid_1488;
+    if active && (grind.primitive_start_1264 != [0; 4] || grind.primitive_end_1280 != [0; 4]) {
+        return Some([grind.primitive_start_1264, grind.primitive_end_1280]);
+    }
+    let target = skater.trajectory.selector.selection()?.grind?;
+    Some([target.edge.start.map(f32::to_bits), target.edge.end.map(f32::to_bits)])
+}
+
+/// While a grind family owns the board, the grind system owns the board's
+/// relationship with the grinded rail. Keep only the rail's upward support
+/// contacts (the surface the board rides on); drop the tube's cap, curl, side
+/// and underside contacts, which the solver otherwise treats as walls and uses
+/// to brake the board or drag it back near the ends. Contacts with any other
+/// geometry, and contacts away from the grinded primitive, are untouched.
+fn keep_grind_support_only(
+    contacts: &mut Vec<BoardCollision>,
+    tick: u64,
+    primitive_start: [u32; 4],
+    primitive_end: [u32; 4],
+) {
+    const RAIL_RADIUS: f32 = 0.35;
+    // The contact must face along the rail's actual top direction (perpendicular
+    // to the axis, up). Comparing against world up keeps the tube's rounded
+    // tip/curl and side faces, which brake the board and drag it backwards.
+    const SUPPORT_ALIGNMENT: f32 = 0.9;
+    let f = f32::from_bits;
+    let start = [f(primitive_start[0]), f(primitive_start[1]), f(primitive_start[2])];
+    let end = [f(primitive_end[0]), f(primitive_end[1]), f(primitive_end[2])];
+    let axis = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if !(length > 1.0e-4) {
+        return;
+    }
+    let unit = [axis[0] / length, axis[1] / length, axis[2] / length];
+    // Rail upmost normal: up minus its axis component, normalized, flipped up.
+    let up = [0.0f32, 1.0, 0.0];
+    let along = up[0] * unit[0] + up[1] * unit[1] + up[2] * unit[2];
+    let mut upmost = [up[0] - unit[0] * along, up[1] - unit[1] * along, up[2] - unit[2] * along];
+    let upmost_length = (upmost[0] * upmost[0] + upmost[1] * upmost[1] + upmost[2] * upmost[2]).sqrt();
+    if upmost_length > 1.0e-4 {
+        upmost = [upmost[0] / upmost_length, upmost[1] / upmost_length, upmost[2] / upmost_length];
+    } else {
+        upmost = up;
+    }
+    if upmost[1] < 0.0 {
+        upmost = upmost.map(|v| -v);
+    }
+    let trace = super::grind_tip_trace::enabled();
+    contacts.retain(|contact| {
+        let board_world = matches!(
+            (contact.body_a, contact.body_b),
+            (CollisionBody::Board(_), CollisionBody::StaticWorld)
+        );
+        let rider_world = matches!(
+            (contact.body_a, contact.body_b),
+            (CollisionBody::Attached(_), CollisionBody::StaticWorld)
+                | (CollisionBody::StaticWorld, CollisionBody::Attached(_))
+        );
+        if !board_world && !rider_world {
+            return true;
+        }
+        let point = contact.contact.position_on_b;
+        let point = if matches!(contact.body_b, CollisionBody::Attached(_)) {
+            contact.contact.position_on_a
+        } else {
+            point
+        };
+        let point = [point.x, point.y, point.z];
+        let rel = [point[0] - start[0], point[1] - start[1], point[2] - start[2]];
+        let t = (rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2]).clamp(0.0, length);
+        let closest = [
+            start[0] + unit[0] * t,
+            start[1] + unit[1] * t,
+            start[2] + unit[2] * t,
+        ];
+        let distance = ((point[0] - closest[0]).powi(2)
+            + (point[1] - closest[1]).powi(2)
+            + (point[2] - closest[2]).powi(2))
+        .sqrt();
+        if distance >= RAIL_RADIUS {
+            return true;
+        }
+        // The rider never touches the rail it is grinding: drop every
+        // rider-rail contact so its body cannot slam the tip.
+        let normal = contact.contact.normal;
+        let alignment = normal.x * upmost[0] + normal.y * upmost[1] + normal.z * upmost[2];
+        let keep = if rider_world { false } else { alignment >= SUPPORT_ALIGNMENT };
+        if trace && !keep {
+            eprintln!(
+                "GRIND_STRIP tick={tick} body={:?} rider={rider_world} dist={distance:.3} align={alignment:.3} n=({:.3},{:.3},{:.3}) p=({:.3},{:.3},{:.3})",
+                contact.body_a, normal.x, normal.y, normal.z, point[0], point[1], point[2]
+            );
+        }
+        keep
+    });
+}
+
 pub(super) fn deck_frame(
     board: &skate_core::physics::board_runtime::BoardRuntime,
 ) -> AnimationPartTransform {
@@ -142,4 +252,65 @@ pub(super) fn deck_frame(
         0.0,
     ];
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skate_core::{
+        math::Vector3,
+        physics::contact::RetailContactInput,
+    };
+
+    fn rail(start: [f32; 3], end: [f32; 3]) -> [[u32; 4]; 2] {
+        [
+            [start[0].to_bits(), start[1].to_bits(), start[2].to_bits(), 0],
+            [end[0].to_bits(), end[1].to_bits(), end[2].to_bits(), 0],
+        ]
+    }
+
+    fn contact(body_a: CollisionBody, normal: [f32; 3], world: [f32; 3]) -> BoardCollision {
+        BoardCollision {
+            body_a,
+            body_b: CollisionBody::StaticWorld,
+            contact: RetailContactInput {
+                position_on_a: Vector3::new(world[0], world[1] + 0.1, world[2]),
+                position_on_b: Vector3::new(world[0], world[1], world[2]),
+                normal: Vector3::new(normal[0], normal[1], normal[2]),
+                restitution: 0.,
+                static_friction: 0.,
+                dynamic_friction: 0.,
+                tag: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn grind_keeps_upward_support_and_drops_rail_side_and_cap() {
+        let [start, end] = rail([0., 0., 0.], [0., 0., 10.]);
+        let mut contacts = vec![
+            // Head-on end face at the rail tip (normal along rail): removed.
+            contact(CollisionBody::Board(BodyId::Deck), [0., 0., 1.], [0., 0., 9.9]),
+            // Tube top supporting the board (near-vertical): kept.
+            contact(CollisionBody::Board(BodyId::RightFrontWheel), [0., 1., 0.], [0., 0., 5.]),
+            // Rider part against the rail end: removed (no rider-rail contact).
+            contact(CollisionBody::Attached(0), [0., 0., 1.], [0., 0., 9.9]),
+            // Tube side (horizontal normal) near the rail: removed.
+            contact(CollisionBody::Board(BodyId::FrontTruck), [1., 0., 0.], [0., 0., 5.]),
+            // Angled end/curl face +Y 0.7 near the rail: removed.
+            contact(CollisionBody::Board(BodyId::FrontTruck), [0.7, 0.7, 0.14], [0., 0., 5.]),
+            // Near-top support aligned with the rail upmost normal: kept.
+            contact(CollisionBody::Board(BodyId::BackTruck), [0.2, 0.975, 0.1], [0., 0., 6.]),
+            // Rider part far from the rail: kept.
+            contact(CollisionBody::Attached(1), [1., 0., 0.], [0., 0., 40.]),
+            // Board face far from this primitive: kept even though horizontal.
+            contact(CollisionBody::Board(BodyId::Deck), [1., 0., 0.], [0., 0., 40.]),
+        ];
+        keep_grind_support_only(&mut contacts, 0, start, end);
+        assert_eq!(contacts.len(), 4);
+        assert!(matches!(contacts[0].body_a, CollisionBody::Board(BodyId::RightFrontWheel)));
+        assert!(matches!(contacts[1].body_a, CollisionBody::Board(BodyId::BackTruck)));
+        assert!(matches!(contacts[2].body_a, CollisionBody::Attached(1)));
+        assert!(matches!(contacts[3].body_a, CollisionBody::Board(BodyId::Deck)));
+    }
 }

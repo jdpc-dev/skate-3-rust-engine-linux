@@ -6,6 +6,26 @@ use std::sync::OnceLock;
 
 static WINDOW: OnceLock<Option<(u64, u64)>> = OnceLock::new();
 
+/// Compact one-line biped position/adjustment probe for the rail-blocking
+/// report. Opt in with SKATE3_BIPED_POS=1. Observation-only.
+pub(super) fn biped_pos(tick: u64, phase: &str, s: &SkaterRuntime) {
+    if std::env::var_os("SKATE3_BIPED_POS").is_none() {
+        return;
+    }
+    let com = s.skeleton.record.centre_of_mass;
+    let root = s.skeleton_input.root_velocity;
+    let ground = s.biped_ground.ground.frame_80[3];
+    eprintln!(
+        "BIPED_POS tick={tick} phase={phase} state={:?} com=({:.3},{:.3},{:.3}) \
+root_v=({:.3},{:.3},{:.3}) ground=({:.3},{:.3},{:.3}) adj={:?}",
+        s.player_state.current(),
+        com[0], com[1], com[2],
+        root[0], root[1], root[2],
+        ground[0], ground[1], ground[2],
+        s.biped_ground.geometry_adjustment
+    );
+}
+
 pub(super) fn stage(
     tick: u64,
     phase: &str,

@@ -118,37 +118,87 @@ pub(super) fn primitives_from_blob(bytes: &[u8]) -> Result<Vec<Primitive>,String
     decoded_from_blob(bytes).map(|(primitives, _)| primitives)
 }
 
+/// Polyline points approximating one authored cubic within one centimetre.
+/// A straight segment returns exactly its two endpoints, so native straight
+/// rails keep the original single-chord primitive. Curved handrail tips (the
+/// swan neck / lower curl) are the only segments that gain sub-chords, which
+/// keeps the grind surface on the visible tube instead of cutting through it.
+pub(crate) fn sub_chord_points(coefficients: &[[f32;4];4]) -> Vec<[f32;4]> {
+    let [a, b, c, d] = *coefficients;
+    let position = |t: f32| -> [f32;4] {
+        std::array::from_fn(|j| a[j].mul_add(t, b[j]).mul_add(t, c[j]).mul_add(t, d[j]))
+    };
+    let start = position(0.0);
+    let end = position(1.0);
+    let chord = sub4(end, start);
+    let length = dot3(chord).sqrt();
+    let mut divisions = 1usize;
+    if length > 1.0e-6 {
+        loop {
+            let unit = scale4(chord, 1.0 / length);
+            let samples = divisions * 2;
+            let mut deviation = 0.0f32;
+            for k in 1..samples {
+                let t = k as f32 / samples as f32;
+                let rel = sub4(position(t), start);
+                let along = dot4(rel, unit);
+                let perpendicular = sub4(rel, scale4(unit, along));
+                deviation = deviation.max(dot4(perpendicular, perpendicular).sqrt());
+            }
+            if deviation <= 0.01 || divisions >= 16 {
+                break;
+            }
+            divisions *= 2;
+        }
+    }
+    if divisions == 1 {
+        return vec![start, end];
+    }
+    (0..=divisions)
+        .map(|k| position(k as f32 / divisions as f32))
+        .collect()
+}
+
+fn sub4(a: [f32;4], b: [f32;4]) -> [f32;4] { std::array::from_fn(|i| a[i]-b[i]) }
+fn scale4(a: [f32;4], s: f32) -> [f32;4] { a.map(|v| v*s) }
+fn dot4(a: [f32;4], b: [f32;4]) -> f32 { a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3] }
+fn dot3(a: [f32;4]) -> f32 { a[0]*a[0]+a[1]*a[1]+a[2]*a[2] }
+
 pub(super) fn decoded_from_blob(bytes: &[u8]) -> Result<(Vec<Primitive>, Vec<PrimitiveMetadata>),String> {
     let word = |at| u32::from_be_bytes(bytes[at..at+4].try_into().unwrap());
     let mut result = Vec::new();
     let mut metadata = Vec::new();
     let base = word(12) as usize;
+    let segment_base = |r: usize| word(r+20) as usize;
     for i in 0..word(4) as usize {
         let s = base+i*144;
         let r = word(s+120) as usize;
         let coefficients: [[f32;4];4] = std::array::from_fn(|v|
             std::array::from_fn(|j| f32::from_bits(word(s+v*16+j*4))));
-        let [a,b,c,d] = coefficients;
-        let end = std::array::from_fn(|j| (a[j]+b[j])+(c[j]+d[j]));
-        let length: f32 = (0..3).map(|j| (end[j]-d[j]).powi(2)).sum();
-        if !length.is_finite() {
-            return Err(format!("Spline segment {i} has a non-finite contact chord"));
-        }
-        // Original 82C1E568 / 82C1F098 emit every segment. Do not drop tiny or
-        // duplicate knots here: downstream contact/selection owns admission.
+        let points = sub_chord_points(&coefficients);
+        let owner = ((r-16)/32 + 1) as u64;
+        let segment_index = ((s-segment_base(r))/144) as u32;
+        let spline_guids = [((word(r) as u64)<<32)|word(r+4) as u64,
+            ((word(r+8) as u64)<<32)|word(r+12) as u64];
         let horizontal_tolerance = f32::from_bits(0x3780_0000);
-        let vertical = (end[0]-d[0]).abs() <= horizontal_tolerance
-            && (end[2]-d[2]).abs() <= horizontal_tolerance;
-        result.push(Primitive {
-            start: d, end,
-            owner: ((r-16)/32 + 1) as u64,
-        });
-        metadata.push(PrimitiveMetadata {
-            spline_guids: [((word(r) as u64)<<32)|word(r+4) as u64,
-                ((word(r+8) as u64)<<32)|word(r+12) as u64],
-            segment_index: ((s-word(r+20) as usize)/144) as u32,
-            flags: if vertical { 0x8000_0000 } else { 0 },
-        });
+        for pair in points.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            let delta = [end[0]-start[0], end[1]-start[1], end[2]-start[2]];
+            if !(delta[0].is_finite() && delta[1].is_finite() && delta[2].is_finite()) {
+                return Err(format!("Spline segment {i} has a non-finite contact chord"));
+            }
+            // Original 82C1E568 / 82C1F098 retain every authored knot. Only
+            // the straight contact chord is subdivided; admission is unchanged.
+            let vertical = delta[0].abs() <= horizontal_tolerance
+                && delta[2].abs() <= horizontal_tolerance;
+            result.push(Primitive { start, end, owner });
+            metadata.push(PrimitiveMetadata {
+                spline_guids,
+                segment_index,
+                flags: if vertical { 0x8000_0000 } else { 0 },
+            });
+        }
     }
     Ok((result, metadata))
 }
