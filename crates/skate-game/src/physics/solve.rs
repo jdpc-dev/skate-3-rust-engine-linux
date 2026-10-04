@@ -161,6 +161,10 @@ fn keep_grind_support_only(
     primitive_end: [u32; 4],
 ) {
     const RAIL_RADIUS: f32 = 0.35;
+    // Contacts beyond either endpoint still belong to the rail's tip/post. A
+    // boardslide crosses the rail, so its leading wheel lands lateral and past
+    // the end; extend the neighbourhood so those are caught too.
+    const END_EXTENSION: f32 = 0.5;
     // The contact must face along the rail's actual top direction (perpendicular
     // to the axis, up). Comparing against world up keeps the tube's rounded
     // tip/curl and side faces, which brake the board and drag it backwards.
@@ -209,7 +213,8 @@ fn keep_grind_support_only(
         };
         let point = [point.x, point.y, point.z];
         let rel = [point[0] - start[0], point[1] - start[1], point[2] - start[2]];
-        let t = (rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2]).clamp(0.0, length);
+        let t = (rel[0] * unit[0] + rel[1] * unit[1] + rel[2] * unit[2])
+            .clamp(-END_EXTENSION, length + END_EXTENSION);
         let closest = [
             start[0] + unit[0] * t,
             start[1] + unit[1] * t,
