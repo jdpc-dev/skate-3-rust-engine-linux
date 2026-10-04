@@ -78,16 +78,32 @@ fi
 if [[ -f $RefpackOutput ]]; then
     install -m 0644 "$RefpackOutput" "$RunDirectory/refpack.${LIBSUFFIX:-so}"
 fi
+# First-run setup runs from the executable directory, so ship the interactive
+# helper next to the binary and its Python pipeline under tools/. The helper
+# locates the accelerator beside fast_refpack.py, so stage a copy there too.
+mkdir -p "$RunDirectory/support"
+install -m 0755 "$ProjectRoot/scripts/setup-linux.sh" "$RunDirectory/support/setup-linux.sh"
+install -m 0755 "$ProjectRoot/scripts/extract-iso-wine.sh" "$RunDirectory/support/extract-iso-wine.sh"
+rm -rf "$RunDirectory/tools"
+cp -a "$ProjectRoot/tools" "$RunDirectory/tools"
+find "$RunDirectory/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
+if [[ -f $RefpackOutput ]]; then
+    install -m 0644 "$RefpackOutput" "$RunDirectory/tools/asset_pipeline/refpack.${LIBSUFFIX:-so}"
+fi
 
 echo "Ready: $RunDirectory/skate3rust"
 if [[ ! -f $RunDirectory/data/installation.json ]]; then
     cat >&2 <<EOF
 
-No installation found. Extract your Xbox 360 Skate 3 disc and convert it:
+No installation found yet. Just launch the game and it will ask for your
+Xbox 360 ISO or default.xex, then prepare the assets automatically:
 
-  ./scripts/extract-iso-wine.sh /path/to/skate3.iso ~/sk3-disc
-  python3 tools/prepare_assets.py --game-root ~/sk3-disc \\
-      --output "$RunDirectory/data" --game-exe "$RunDirectory/skate3rust"
+  ./scripts/play-linux.sh
+
+For an unattended install, run the same helper directly:
+
+  "$RunDirectory/support/setup-linux.sh" --base "$RunDirectory/data" \\
+      --game-exe "$RunDirectory/skate3rust" --source /path/to/skate3.iso
 EOF
 elif ! python3 - "$RunDirectory" <<'PY'
 import json,pathlib,sys

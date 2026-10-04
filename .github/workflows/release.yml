@@ -1,4 +1,4 @@
-name: Windows release
+name: Release
 on:
   push:
     branches: [main]
@@ -85,20 +85,65 @@ jobs:
             target/skate3rust-windows-x64.zip
             target/skate3rust-windows-x64.zip.sha256
             target/release.json
+  linux:
+    # The rolling experimental channel remains Windows-only, so skip Linux for
+    # that release event, exactly like the Windows job.
+    if: github.event_name != 'release' || github.event.release.tag_name != 'experimental'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: linux-build-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: tools/requirements-setup.txt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+          cache-on-failure: true
+      # Bevy/winit and gilrs link against these.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libudev-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev
+      # Records the character customiser fingerprint in release.json.
+      - name: Install asset pipeline dependencies
+        run: python -m pip install numpy Pillow
+      - name: Build and package Linux release
+        run: ./scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skate3rust-linux-x64
+          retention-days: 7
+          path: |
+            target/skate3rust-linux-x64.tar.gz
+            target/skate3rust-linux-x64.tar.gz.sha256
   publish:
-    needs: windows
+    needs: [windows, linux]
     if: github.event_name == 'release' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     concurrency:
-      group: windows-release-publish
+      group: release-publish
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: skate3rust-windows-x64
+          path: target
+      - uses: actions/download-artifact@v4
+        with:
+          name: skate3rust-linux-x64
           path: target
       - name: Publish rolling experimental
         if: github.event_name != 'release'
@@ -110,4 +155,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" target/skate3rust-windows-x64.zip target/skate3rust-windows-x64.zip.sha256 target/release.json --clobber
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            target/skate3rust-windows-x64.zip \
+            target/skate3rust-windows-x64.zip.sha256 \
+            target/release.json \
+            target/skate3rust-linux-x64.tar.gz \
+            target/skate3rust-linux-x64.tar.gz.sha256 \
+            --clobber

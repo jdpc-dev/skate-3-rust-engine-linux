@@ -25,6 +25,24 @@ fn installed(base: &Path) -> Result<Option<(PathBuf, serde_json::Value)>, String
     Ok(Some((assets, marker)))
 }
 
+#[cfg(windows)]
+fn setup_program() -> &'static str { "support/skate3setup.exe" }
+
+#[cfg(not(windows))]
+fn setup_program() -> &'static str { "support/setup-linux.sh" }
+
+#[cfg(windows)]
+fn setup_command(setup: &Path) -> Command { Command::new(setup) }
+
+#[cfg(not(windows))]
+fn setup_command(setup: &Path) -> Command {
+    // Run through the shell: a ZIP or a shared filesystem may strip the
+    // executable bit, and the bundled helper is a Bash script anyway.
+    let mut command = Command::new("sh");
+    command.arg(setup);
+    command
+}
+
 pub(crate) fn asset_root() -> Result<PathBuf, String> {
     if std::env::args_os().any(|arg| arg == "--assets") { return Ok(PathBuf::from("assets")); }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -51,11 +69,14 @@ pub(crate) fn asset_root() -> Result<PathBuf, String> {
             return Ok(assets.clone());
         }
     }
-    let setup = root.join("support/skate3setup.exe");
+    let setup = root.join(setup_program());
     if !setup.is_file() {
-        return Err("This copy has not been set up. Use the complete Windows package, or --assets DIRECTORY for development.".into());
+        return Err(format!(
+            "This copy has not been set up. Restore {} from the complete package, or use --assets DIRECTORY for development.",
+            setup.display()
+        ));
     }
-    let mut command = Command::new(setup);
+    let mut command = setup_command(&setup);
     command.arg("--base").arg(&base).arg("--game-exe").arg(&exe);
     if existing.is_some() { command.arg("--refresh"); }
     #[cfg(windows)] {
