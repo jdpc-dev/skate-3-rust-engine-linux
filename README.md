@@ -63,3 +63,17 @@ not affiliated with EA.
 
 Windows builds support opt-in [performance timeline capture](docs/performance-tracing.md)
 through the `--trace` CLI option, including optional GPU pass diagnostics.
+
+## License
+
+Copyright (c) 2026 dumbad and the Skate 3 Rust Engine contributors.
+Unless otherwise noted, this project's original code is licensed under the
+[GNU General Public License version 3 only](LICENSE) (`GPL-3.0-only`).
+You may use, modify, and distribute it, including commercially. If you distribute
+a modified version or a binary of the covered software, you must also make its
+corresponding source available under GPLv3 and preserve the required notices.
+
+Third-party code retains its existing licenses and copyright notices, including
+the vendored Bevy crates and tooling under `tools/vendor/`. This license does
+not grant rights to Electronic Arts' game code, data, assets, or trademarks,
+or to content supplied by other map and mod authors.
