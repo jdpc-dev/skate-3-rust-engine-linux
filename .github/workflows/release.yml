@@ -98,11 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          cache: pip
-          cache-dependency-path: tools/requirements-setup.txt
+      # No setup-python here: the AppImage bundles its own portable CPython, so
+      # there is no pip cache to restore and no host packages to install.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-release
@@ -143,8 +140,10 @@ jobs:
         with:
           name: skate3rust-linux-x64
           path: target
+      # publish_experimental.py and the updater identity are pinned to the
+      # upstream repository, so skip the rolling channel in forks.
       - name: Publish rolling experimental
-        if: github.event_name != 'release'
+        if: github.event_name != 'release' && github.repository == 'SK8-ENGINE/skate-3-rust-engine'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python tools/publish_experimental.py --directory target
