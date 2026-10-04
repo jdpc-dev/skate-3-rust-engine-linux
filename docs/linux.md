@@ -6,11 +6,14 @@ flow is replaced by three scripts under `scripts/`:
 | Windows | Linux |
 | --- | --- |
 | `BUILD.bat` + `scripts/Build.ps1` | `scripts/build-linux.sh` |
+| `support/skate3setup.exe` first-run setup | `support/setup-linux.sh` (run automatically) |
 | ISO extraction inside the setup helper | `scripts/extract-iso-wine.sh` |
 | `PLAY.bat` + `scripts/Launch.ps1` | `scripts/play-linux.sh` |
 
 There is no bundled Python runtime, installer, auto-updater or Steam relay on
-Linux; assets are prepared explicitly with the tools in `tools/`.
+Linux. The first launch runs `support/setup-linux.sh`, which asks for your game
+and prepares the assets, using the system `python3` (with `numpy` and `Pillow`).
+Wine is only needed when the source is an ISO.
 
 ## Prerequisites
 
@@ -67,23 +70,30 @@ conversion then falls back to a slower pure-Python decoder.
 
 ## Prepare assets
 
-Extract the disc once via Wine, then convert it. Both steps only need the game
-files you already own; no assets are downloaded.
+No manual step is required. The first time you launch the game it detects that
+`run/data/installation.json` is missing and runs `support/setup-linux.sh`, which
+asks for your Skate 3 Xbox 360 ISO or `default.xex` on the terminal. It extracts
+the ISO with Wine when needed and then converts the disc. Only the game files
+you already own are used; no assets are downloaded.
+
+You can also run the helper directly, for example to install unattended from a
+path you already know:
 
 ```bash
-./scripts/extract-iso-wine.sh /path/to/skate3.iso ~/sk3-disc
-python3 tools/prepare_assets.py --game-root ~/sk3-disc \
-    --output run/data --game-exe run/skate3rust
+run/support/setup-linux.sh --base run/data --game-exe run/skate3rust \
+    --source /path/to/skate3.iso
 ```
 
-`extract-iso-wine.sh` downloads the hash-pinned XboxDev extract-xiso build and
-runs it under Wine, then verifies the required `data/big/*.big` archives are
-present. If you already have an extracted disc, skip it and point
-`--game-root` at that folder.
+`setup-linux.sh` delegates ISO extraction to `extract-iso-wine.sh`, which
+downloads the hash-pinned XboxDev extract-xiso build and runs it under Wine,
+then verifies the required `data/big/*.big` archives are present. If you already
+have an extracted disc, select its `default.xex` (or the folder) instead of an
+ISO and Wine is not used.
 
-`prepare_assets.py` writes the converted installation to `run/data` and records
-`run/data/installation.json`, which the engine reads on launch. It also prepares
-the [character customiser](character-customisation.md) library, so the first
+Conversion runs `tools/prepare_assets.py`, which writes the converted
+installation to `run/data` and records `run/data/installation.json`, which the
+engine reads on launch. It also prepares the
+[character customiser](character-customisation.md) library, so the first
 conversion also builds the owned clothing, bodies, tattoos and pro characters.
 Conversion can take a while; native RefPack decompression and batched texture
 decoding keep it close to the Windows setup timings.
@@ -109,9 +119,23 @@ prints the `--character-only` command when it detects that state.
 ./scripts/play-linux.sh map.skate  # a specific map
 ```
 
-The launcher runs the executable from `run/` so relative files land beside the
-game, and writes `run/logs/game-<timestamp>.log` (plus a `.stderr.log`). Press
-Escape for graphics, difficulty and map settings. Use an XInput-style gamepad.
+On the first run the terminal asks for your game before the window opens; later
+runs start immediately. The launcher runs the executable from `run/` so relative
+files land beside the game, and writes `run/logs/game-<timestamp>.log` (plus a
+`.stderr.log`). Press Escape for graphics, difficulty and map settings. Use an
+XInput-style gamepad.
+
+## Package a release
+
+```bash
+./scripts/package-linux.sh
+```
+
+This builds and stages `run/`, then writes
+`target/skate3rust-linux-x64.tar.gz` and its `.sha256`. The archive omits
+`run/data/` (per-copy converted content) and `run/logs/`, and includes the
+interactive setup helper so a fresh extract sets itself up on first launch.
+Set `SKIP_BUILD=1` to package an already staged `run/` directory.
 
 ## Controllers
 

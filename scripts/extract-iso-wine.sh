@@ -92,6 +92,8 @@ for required in default.xex data/big/miscload.big data/big/miscboot.big \
     fi
 done
 
-echo "Ready. Convert the disc with:"
-echo "  python3 $ProjectRoot/tools/prepare_assets.py --game-root $Destination \\"
-echo "      --output $ProjectRoot/run/data --game-exe $ProjectRoot/run/skate3rust"
+if [[ -z ${SKATE3_SETUP_QUIET:-} ]]; then
+    echo "Ready. Convert the disc with:"
+    echo "  python3 $ProjectRoot/tools/prepare_assets.py --game-root $Destination \\"
+    echo "      --output $ProjectRoot/run/data --game-exe $ProjectRoot/run/skate3rust"
+fi
