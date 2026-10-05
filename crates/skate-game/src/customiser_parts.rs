@@ -658,14 +658,20 @@ pub(crate) fn update(
     for (_, mid) in &precache {
         parts.warm(mid, &server, &mut materials);
     }
-    let precache: HashSet<String> = precache.into_iter().map(|(id, _)| id).collect();
-    for id in precache {
-        if parts.instances.contains_key(&id) {
+    // Instance only the pieces the skater is actually wearing. Pre-spawning a
+    // whole browsed page as hidden SceneRoots left every visited item resident
+    // under the moving player, so Bevy re-propagated all those hidden rigs every
+    // frame the skater moved (but not while the preview held the player still),
+    // and the cost persisted for the session. Every part GLB is already loaded
+    // by `setup`, so instancing a selection on demand stays instant without a
+    // resident hidden copy.
+    for (id, _) in &desired {
+        if parts.instances.contains_key(id) {
             continue;
         }
-        if let Some(handle) = parts.geometry.get(&id) {
+        if let Some(handle) = parts.geometry.get(id) {
             if server.is_loaded_with_dependencies(handle.id()) {
-                let scene = parts.library.models[&id].scene.clone();
+                let scene = parts.library.models[id].scene.clone();
                 let entity = commands
                     .spawn((
                         PartRoot(id.clone()),
@@ -674,7 +680,7 @@ pub(crate) fn update(
                     ))
                     .id();
                 commands.entity(root).add_child(entity);
-                parts.instances.insert(id, entity);
+                parts.instances.insert(id.clone(), entity);
             }
         }
     }
@@ -758,6 +764,20 @@ pub(crate) fn update(
                     .remove::<MeshMaterial3d<StandardMaterial>>()
                     .insert(MeshMaterial3d(handle.clone()));
             }
+        }
+    }
+    // Retire pieces that are no longer part of the current outfit, so browsing
+    // cannot accumulate hidden rigs that outlive the menu and keep the moving
+    // player's transform tree growing.
+    let stale: Vec<String> = parts
+        .instances
+        .keys()
+        .filter(|id| !wanted.contains(id.as_str()))
+        .cloned()
+        .collect();
+    for id in stale {
+        if let Some(entity) = parts.instances.remove(&id) {
+            commands.entity(entity).despawn();
         }
     }
     let weights: Vec<f32> = parts
