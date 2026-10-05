@@ -2,7 +2,7 @@
 use crate::retail_irradiance::Irradiance;
 use bevy::{
     asset::embedded_asset,
-    camera::visibility::RenderLayers,
+    camera::visibility::{RenderLayers, ViewVisibility},
     gltf::GltfMaterialName,
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
@@ -338,6 +338,10 @@ fn update(
     time: Res<Time>,
     mut changed: Local<Vec<AssetId<CharacterMaterial>>>,
     mut stamped: Local<Vec<AssetId<crate::customiser_material::SkaterMaterial>>>,
+    skater_meshes: Query<(
+        &MeshMaterial3d<crate::customiser_material::SkaterMaterial>,
+        Option<&ViewVisibility>,
+    )>,
 ) {
     let (Some(mut lighting), Ok(root)) = (lighting, root.single()) else {
         return;
@@ -352,15 +356,24 @@ fn update(
         std::array::from_fn(|i| old[i].lerp(sh[i], weight))
     });
     publish_sh(&mut materials, displayed, &mut changed);
-    // `Assets::iter_mut` queues a Modified event for every asset it yields, even
-    // when the payload is identical, rebuilding that material's GPU bindings.
-    // The customiser keeps every material it has ever warmed for the rest of the
-    // session, so a per-frame sweep makes the cost grow with each customisation
-    // and the frame rate never recovers. Read first and mutate only the
-    // retail-lit materials whose light or SH actually moved, exactly as
-    // `publish_sh` does above.
+    // While the skater moves, `displayed` changes every frame, so this must not
+    // sweep the whole customiser material collection: the customiser warms a new
+    // material for every item ever browsed and keeps it for the session, and
+    // `get_mut` on each one queues a Modified event that rebuilds its GPU
+    // bindings. That made the frame cost grow with browsing even though the menu
+    // itself was fine (the player stands still, so `displayed` settles). Only
+    // touch materials actually attached to a mesh; that set is the worn outfit,
+    // not the warmed catalogue. Read first and skip bitwise-identical payloads,
+    // exactly as `publish_sh` does above.
     stamped.clear();
-    stamped.extend(stamped_materials(&customiser, lighting.light, displayed));
+    stamped.extend(stamped_materials(
+        &customiser,
+        skater_meshes.iter().filter_map(|(material, visibility)| {
+            visibility.is_none_or(|v| v.get()).then_some(material.0.id())
+        }),
+        lighting.light,
+        displayed,
+    ));
     for &id in stamped.iter() {
         if let Some(material) = customiser.get_mut(id) {
             material.extension.retail.light = lighting.light;
@@ -373,19 +386,23 @@ fn update(
     shadow.approach(sh[0].truncate(), time.delta_secs());
 }
 
-/// Ids of retail-lit customiser materials whose light or SH differ bitwise from
-/// the requested values. Reading first keeps the per-frame update from emitting
+/// Ids among `candidates` whose retail light or SH differ bitwise from the
+/// requested values. Reading first keeps the per-frame update from emitting
 /// `AssetEvent::Modified` for materials that did not change.
 fn stamped_materials(
     customiser: &Assets<crate::customiser_material::SkaterMaterial>,
+    candidates: impl IntoIterator<Item = AssetId<crate::customiser_material::SkaterMaterial>>,
     light: Vec4,
     displayed: [Vec4; 9],
 ) -> Vec<AssetId<crate::customiser_material::SkaterMaterial>> {
     let light = light.to_array().map(f32::to_bits);
     let sh_bits = displayed.map(|v| v.to_array().map(f32::to_bits));
-    customiser
-        .iter()
-        .filter_map(|(id, material)| {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .filter_map(|id| {
+            let material = customiser.get(id)?;
             let retail = &material.extension.retail;
             if retail.tint.w == 0. {
                 return None;
@@ -538,23 +555,31 @@ mod tests {
         let lit = assets.add(piece(Vec4::ONE));
         let plain = assets.add(piece(Vec4::ZERO));
         let displayed = [Vec4::ZERO; 9];
-        assert_eq!(stamped_materials(&assets, Vec4::ONE, displayed), vec![lit.id()]);
-        for &id in &stamped_materials(&assets, Vec4::ONE, displayed) {
+        let all = |assets: &Assets<crate::customiser_material::SkaterMaterial>| {
+            assets.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stamped_materials(&assets, all(&assets), Vec4::ONE, displayed),
+            vec![lit.id()]
+        );
+        for &id in &stamped_materials(&assets, all(&assets), Vec4::ONE, displayed) {
             let material = assets.get_mut(id).unwrap();
             material.extension.retail.light = Vec4::ONE;
             material.extension.retail.sh = displayed;
         }
         // Re-running with identical values must not touch any material, or the
         // renderer rebuilds every warmed customiser material's bindings.
-        assert!(stamped_materials(&assets, Vec4::ONE, displayed).is_empty());
-        assert!(!stamped_materials(&assets, Vec4::ONE, displayed).contains(&plain.id()));
+        assert!(stamped_materials(&assets, all(&assets), Vec4::ONE, displayed).is_empty());
+        assert!(!stamped_materials(&assets, all(&assets), Vec4::ONE, displayed).contains(&plain.id()));
+        // A material only reported when it is among the supplied candidates.
+        assert!(!stamped_materials(&assets, [plain.id()], Vec4::ONE, displayed).contains(&lit.id()));
         // Signed zero and NaN payloads must retain their bits, without epsilon tests.
         let moved = {
             let mut moved = displayed;
             moved[0] = Vec4::new(-0.0, f32::from_bits(0x7fc01234), 1.0, 0.0);
             moved
         };
-        assert_eq!(stamped_materials(&assets, Vec4::ONE, moved), vec![lit.id()]);
+        assert_eq!(stamped_materials(&assets, all(&assets), Vec4::ONE, moved), vec![lit.id()]);
     }
 
     #[test]
