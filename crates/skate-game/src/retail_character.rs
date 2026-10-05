@@ -337,6 +337,7 @@ fn update(
     mut shadow: ResMut<crate::retail_render::ShadowState>,
     time: Res<Time>,
     mut changed: Local<Vec<AssetId<CharacterMaterial>>>,
+    mut stamped: Local<Vec<AssetId<crate::customiser_material::SkaterMaterial>>>,
 ) {
     let (Some(mut lighting), Ok(root)) = (lighting, root.single()) else {
         return;
@@ -351,15 +352,53 @@ fn update(
         std::array::from_fn(|i| old[i].lerp(sh[i], weight))
     });
     publish_sh(&mut materials, displayed, &mut changed);
-    for (_, material) in customiser.iter_mut() {
-        if material.extension.retail.tint.w == 0. { continue; }
-        material.extension.retail.light = lighting.light;
-        material.extension.retail.sh = displayed;
+    // `Assets::iter_mut` queues a Modified event for every asset it yields, even
+    // when the payload is identical, rebuilding that material's GPU bindings.
+    // The customiser keeps every material it has ever warmed for the rest of the
+    // session, so a per-frame sweep makes the cost grow with each customisation
+    // and the frame rate never recovers. Read first and mutate only the
+    // retail-lit materials whose light or SH actually moved, exactly as
+    // `publish_sh` does above.
+    stamped.clear();
+    stamped.extend(stamped_materials(&customiser, lighting.light, displayed));
+    for &id in stamped.iter() {
+        if let Some(material) = customiser.get_mut(id) {
+            material.extension.retail.light = lighting.light;
+            material.extension.retail.sh = displayed;
+        }
     }
     lighting.display_sh = Some(displayed);
     // Adapter floor: the local probe's direction-independent ambient term.
     // The native per-frame c8 shadow-colour controller remains unrecovered.
     shadow.approach(sh[0].truncate(), time.delta_secs());
+}
+
+/// Ids of retail-lit customiser materials whose light or SH differ bitwise from
+/// the requested values. Reading first keeps the per-frame update from emitting
+/// `AssetEvent::Modified` for materials that did not change.
+fn stamped_materials(
+    customiser: &Assets<crate::customiser_material::SkaterMaterial>,
+    light: Vec4,
+    displayed: [Vec4; 9],
+) -> Vec<AssetId<crate::customiser_material::SkaterMaterial>> {
+    let light = light.to_array().map(f32::to_bits);
+    let sh_bits = displayed.map(|v| v.to_array().map(f32::to_bits));
+    customiser
+        .iter()
+        .filter_map(|(id, material)| {
+            let retail = &material.extension.retail;
+            if retail.tint.w == 0. {
+                return None;
+            }
+            let unchanged = retail.light.to_array().map(f32::to_bits) == light
+                && retail
+                    .sh
+                    .iter()
+                    .zip(&sh_bits)
+                    .all(|(a, b)| a.to_array().map(f32::to_bits) == *b);
+            (!unchanged).then_some(id)
+        })
+        .collect()
 }
 
 fn publish_sh(materials: &mut Assets<CharacterMaterial>, displayed: [Vec4; 9], changed: &mut Vec<AssetId<CharacterMaterial>>) {
@@ -482,6 +521,40 @@ mod tests {
         assert_eq!(scratch,vec![second.id()]);
         let assets=app.world().resource::<Assets<CharacterMaterial>>();
         for handle in [&first,&second] { assert_eq!(assets.get(handle).unwrap().params.sh[0].to_array().map(f32::to_bits),displayed[0].to_array().map(f32::to_bits)); }
+    }
+
+    #[test]
+    fn stamped_materials_only_reports_retail_lit_pieces_that_actually_moved() {
+        fn piece(tint: Vec4) -> crate::customiser_material::SkaterMaterial {
+            crate::customiser_material::SkaterMaterial {
+                base: StandardMaterial::default(),
+                extension: crate::customiser_material::SkinStamp {
+                    retail: CharacterParams { light: Vec4::ZERO, tint, ..default() },
+                    ..default()
+                },
+            }
+        }
+        let mut assets = Assets::<crate::customiser_material::SkaterMaterial>::default();
+        let lit = assets.add(piece(Vec4::ONE));
+        let plain = assets.add(piece(Vec4::ZERO));
+        let displayed = [Vec4::ZERO; 9];
+        assert_eq!(stamped_materials(&assets, Vec4::ONE, displayed), vec![lit.id()]);
+        for &id in &stamped_materials(&assets, Vec4::ONE, displayed) {
+            let material = assets.get_mut(id).unwrap();
+            material.extension.retail.light = Vec4::ONE;
+            material.extension.retail.sh = displayed;
+        }
+        // Re-running with identical values must not touch any material, or the
+        // renderer rebuilds every warmed customiser material's bindings.
+        assert!(stamped_materials(&assets, Vec4::ONE, displayed).is_empty());
+        assert!(!stamped_materials(&assets, Vec4::ONE, displayed).contains(&plain.id()));
+        // Signed zero and NaN payloads must retain their bits, without epsilon tests.
+        let moved = {
+            let mut moved = displayed;
+            moved[0] = Vec4::new(-0.0, f32::from_bits(0x7fc01234), 1.0, 0.0);
+            moved
+        };
+        assert_eq!(stamped_materials(&assets, Vec4::ONE, moved), vec![lit.id()]);
     }
 
     #[test]
